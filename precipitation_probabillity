@@ -1,0 +1,278 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import os
+
+class SnowfallAnalyzer:
+    def __init__(self, base_path):
+        """
+        Initialize the analyzer with the base path for data files.
+        
+        Parameters:
+        -----------
+        base_path : str
+            Base directory path containing the data files
+        """
+        self.base_path = Path(base_path)
+        
+        # Station elevations (meters above sea level)
+        self.station_elevations = {
+            'hans4': 190,
+            'hans9': 420,
+            'werenskiold': 360
+        }
+        
+        # Hornsund elevation (base station for precipitation)
+        self.hornsund_elevation = 10
+        
+    def calculate_temperature_probability(self, temperature):
+        """
+        Calculate probability component based on temperature using sigmoid function.
+        
+        Parameters:
+        -----------
+        temperature : float or array-like
+            Temperature in Celsius
+        
+        Returns:
+        --------
+        float or array-like : Probability between 0 and 1
+        """
+        k = 1.5  # steepness of transition
+        t0 = 1.0  # center point of transition
+        return 1 / (1 + np.exp(k * (temperature - t0)))
+    
+    def calculate_precipitation_probability(self, precipitation):
+        """
+        Calculate probability component based on precipitation amount.
+        
+        Parameters:
+        -----------
+        precipitation : float or array-like
+            Precipitation in mm
+        
+        Returns:
+        --------
+        float or array-like : Probability between 0 and 1
+        """
+        min_threshold = 0.1
+        max_threshold = 5.0
+        
+        # Initialize array of zeros with same shape as input
+        result = np.zeros_like(precipitation, dtype=float)
+        
+        # Set 0.2 probability for very light precipitation
+        light_precip_mask = (precipitation > 0) & (precipitation < min_threshold)
+        result[light_precip_mask] = 0.2
+        
+        # Calculate probability for significant precipitation
+        sig_precip_mask = precipitation >= min_threshold
+        scaled_precip = np.log10(precipitation[sig_precip_mask] / min_threshold) / \
+                       np.log10(max_threshold / min_threshold)
+        result[sig_precip_mask] = np.minimum(scaled_precip, 1.0)
+        
+        return result
+    
+    def adjust_for_elevation(self, data, station):
+        """
+        Adjust precipitation based on elevation difference.
+        Temperature is not adjusted as it's measured directly at each station.
+        
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            DataFrame containing temperature and precipitation data
+        station : str
+            Station name to get elevation
+                
+        Returns:
+        --------
+        pd.DataFrame : Adjusted data with only precipitation modified
+        """
+        elevation_diff = self.station_elevations[station] - self.hornsund_elevation
+
+        # Copy data to avoid modifying original
+        adjusted_data = data.copy()
+
+        # Only adjust precipitation (10% increase per 100m)
+        if 'precipitation' in adjusted_data.columns:
+            adjusted_data['precipitation'] = data['precipitation'] * (1 + (elevation_diff / 100) * 0.1)
+            
+        return adjusted_data
+
+    def process_station_data(self, station, year):
+        """
+        Process data for a single station and year.
+        
+        Parameters:
+        -----------
+        station : str
+            Station name (hans4, hans9, or werenskiold)
+        year : int
+            Year to process
+            
+        Returns:
+        --------
+        pd.DataFrame : Processed data with snowfall probabilities
+        """
+        # Read glacier data
+        glacier_file = f"{station}_{year}_daily_ready.csv"
+        glacier_path = self.base_path / glacier_file
+        
+        # Read precipitation data
+        precip_file = f"hornsund_{year}_precip.csv"
+        precip_path = self.base_path / precip_file
+        
+        # Check if files exist
+        if not glacier_path.exists() or not precip_path.exists():
+            print(f"Missing data files for {station} {year}")
+            return None
+        
+        # Read data
+        glacier_data = pd.read_csv(glacier_path)
+        precip_data = pd.read_csv(precip_path)
+        
+        # Merge data
+        merged_data = pd.merge(glacier_data, precip_data[['date', 'precipitation']], 
+                             on='date', how='left')
+        
+        # Adjust for elevation
+        adjusted_data = self.adjust_for_elevation(merged_data, station)
+        
+        # Calculate probabilities
+        temp_prob = self.calculate_temperature_probability(adjusted_data['TC'])
+        precip_prob = self.calculate_precipitation_probability(adjusted_data['precipitation'])
+        
+        # Calculate final probability
+        snowfall_prob = temp_prob * precip_prob
+        
+        # Remove old columns and add probability
+        cols_to_remove = ['snowfall_probable', 'significant_albedo_increase', 
+                         'snowfall_validated']
+        adjusted_data = adjusted_data.drop(columns=cols_to_remove, errors='ignore')
+        adjusted_data['snowfall_probability'] = snowfall_prob
+        
+        return adjusted_data
+    
+    def plot_station_analysis(self, data, station, year):
+        """
+        Create visualization for station data including albedo values.
+        
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            Processed station data
+        station : str
+            Station name
+        year : int
+            Year of data
+        """
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12))
+        fig.suptitle(f'Snowfall Analysis for {station.upper()} {year}')
+        
+        # Plot 1: Time series with three y-axes
+        # Temperature axis (left)
+        ax1.plot(data['day_of_year'], data['TC'], 'g-', label='Temperature', alpha=0.6)
+        ax1.set_xlabel('Day of Year')
+        ax1.set_ylabel('Temperature (°C)', color='g')
+        ax1.tick_params(axis='y', labelcolor='g')
+        
+        # Snowfall probability axis (right)
+        ax1_prob = ax1.twinx()
+        ax1_prob.plot(data['day_of_year'], data['snowfall_probability'], 'b-', 
+                     label='Snowfall Probability', alpha=0.8)
+        ax1_prob.set_ylabel('Snowfall Probability', color='b')
+        ax1_prob.tick_params(axis='y', labelcolor='b')
+        ax1_prob.set_ylim(0, 1)
+        
+        # Albedo axis (far right)
+        ax1_albedo = ax1.twinx()
+        # Offset the axis
+        ax1_albedo.spines["right"].set_position(("axes", 1.1))
+        ax1_albedo.plot(data['day_of_year'], data['albedo'], 'r-', 
+                       label='Albedo', alpha=0.6)
+        ax1_albedo.set_ylabel('Albedo', color='r')
+        ax1_albedo.tick_params(axis='y', labelcolor='r')
+        ax1_albedo.set_ylim(0, 1)
+        
+        # Combine legends
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax1_prob.get_legend_handles_labels()
+        lines3, labels3 = ax1_albedo.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, 
+                  loc='upper right', bbox_to_anchor=(0.9, 1))
+        
+        # Plot 2: Temperature vs Precipitation with probability colors
+        scatter = ax2.scatter(data['TC'], data['precipitation'], 
+                            c=data['snowfall_probability'],
+                            cmap='coolwarm', alpha=0.6)
+        plt.colorbar(scatter, ax=ax2, label='Snowfall Probability')
+        
+        # Add albedo information to scatter plot using size
+        # Normalize albedo for scatter size (larger points = higher albedo)
+        sizes = 20 + data['albedo'] * 100
+        ax2.scatter(data['TC'], data['precipitation'], s=sizes, 
+                   facecolors='none', edgecolors='red', alpha=0.2,
+                   label='Albedo (point size)')
+        
+        ax2.set_xlabel('Temperature (°C)')
+        ax2.set_ylabel('Precipitation (mm)')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Additional validation plot: Albedo vs Snowfall Probability
+        plt.figure(figsize=(10, 6))
+        plt.scatter(data['snowfall_probability'], data['albedo'], 
+                   c=data['TC'], cmap='coolwarm')
+        plt.colorbar(label='Temperature (°C)')
+        plt.xlabel('Snowfall Probability')
+        plt.ylabel('Albedo')
+        plt.title(f'Snowfall Probability vs Albedo for {station.upper()} {year}')
+        plt.grid(True, alpha=0.3)
+        plt.show()
+
+
+def main():
+    # Set up base path
+    base_path = Path(r"C:\Users\PC\PhD\2024_Hans_data\Albedo_Glacier_ML\processed_data\daily_ready")
+    
+    # Initialize analyzer
+    analyzer = SnowfallAnalyzer(base_path)
+    
+    # Process all stations and years
+    stations_years = {
+        'hans4': [2010, 2011],
+        'hans9': [2010, 2011],
+        'werenskiold': [2011, 2012]
+    }
+    
+    # Process and save results
+    for station, years in stations_years.items():
+        for year in years:
+            print(f"\nProcessing {station} {year}")
+            
+            # Process data
+            processed_data = analyzer.process_station_data(station, year)
+            
+            if processed_data is not None:
+                # Save processed data
+                output_file = f"{station}_{year}_processed.csv"
+                output_path = base_path / "processed_probability" / output_file
+                
+                # Create directory if it doesn't exist
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Save to CSV
+                processed_data.to_csv(output_path, index=False)
+                print(f"Saved processed data to {output_file}")
+                
+                # Create visualization
+                analyzer.plot_station_analysis(processed_data, station, year)
+            
+if __name__ == "__main__":
+    main()

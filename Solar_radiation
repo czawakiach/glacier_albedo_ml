@@ -1,0 +1,257 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+import seaborn as sns
+%matplotlib inline
+plt.style.use('seaborn')
+
+# Station configurations remain the same
+STATIONS = {
+    'hans4': {
+        'latitude': 77.048,
+        'longitude': 15.63,
+        'years': [2010, 2011]
+    },
+    'hans9': {
+        'latitude': 77.12,
+        'longitude': 15.49,
+        'years': [2010, 2011]
+    },
+    'werenskiold': {
+        'latitude': 77.072,
+        'longitude': 15.367,
+        'years': [2011, 2012]
+    }
+}
+
+def calculate_solar_position(latitude, longitude, date):
+    """Calculate solar position for a given location and date"""
+    day_of_year = date.timetuple().tm_yday
+    
+    # Solar declination angle
+    declination = 23.45 * np.sin(np.radians(360/365 * (day_of_year - 81)))
+    
+    # Calculate for all hours in the day
+    hours = np.arange(0, 24)
+    hour_angles = 15 * (hours - 12)
+    
+    # Calculate cos_zenith directly
+    cos_zenith = (np.sin(np.radians(latitude)) * np.sin(np.radians(declination)) + 
+                  np.cos(np.radians(latitude)) * np.cos(np.radians(declination)) * 
+                  np.cos(np.radians(hour_angles)))
+    
+    # Calculate solar zenith angle
+    solar_zenith = np.arccos(np.clip(cos_zenith, -1, 1))  # Clip to avoid numerical errors
+    
+    return solar_zenith, cos_zenith
+
+def calculate_daily_clear_sky_radiation(latitude, longitude, date):
+    """Calculate total daily clear sky radiation"""
+    solar_zenith, cos_zenith = calculate_solar_position(latitude, longitude, date)
+    
+    # Constants
+    solar_constant = 1367  # W/m²
+    linke_turbidity = 2.0  # Typical value for clean arctic air
+    
+    # Calculate air mass for each hour
+    air_mass = np.where(cos_zenith > 0, 1/cos_zenith, float('inf'))
+    
+    # Calculate atmospheric transmissivity
+    atmospheric_transmissivity = np.where(
+        cos_zenith > 0,
+        0.75 * np.exp(-0.15 * air_mass),
+        0
+    )
+    
+    # Calculate hourly radiation
+    hourly_radiation = np.where(
+        cos_zenith > 0,
+        solar_constant * cos_zenith * atmospheric_transmissivity,
+        0
+    )
+    
+    # Add diffuse radiation (modified for Arctic conditions)
+    diffuse_fraction = 0.5  # Increased for Arctic conditions
+    total_hourly_radiation = hourly_radiation * (1 + diffuse_fraction)
+    
+    # Calculate daily mean only for daylight hours
+    daily_total = np.sum(total_hourly_radiation)  # Daily sum in Wh/m²
+    daily_mean = daily_total / 24  # Convert to average W/m²
+    
+    return daily_mean
+
+def process_station_data(station_name, year):
+    """Process data for a single station and year"""
+    file_path = f"C:\\Users\\PC\\PhD\\2024_Hans_data\\Albedo_Glacier_ML\\processed_data\\with_snow\\{station_name}_{year}_daily_with_snow.csv"
+    
+    # Read the CSV file
+    df = pd.read_csv(file_path)
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # Calculate theoretical clear sky radiation for each day
+    clear_sky_radiation = []
+    for date in df['date']:
+        radiation = calculate_daily_clear_sky_radiation(
+            STATIONS[station_name]['latitude'],
+            STATIONS[station_name]['longitude'],
+            date
+        )
+        clear_sky_radiation.append(radiation)
+    
+    # Add clear sky radiation to dataframe
+    df['clear_sky_radiation'] = clear_sky_radiation
+    
+    # Calculate cloudiness index
+    df['cloudiness'] = 1 - (df['KC'] / df['clear_sky_radiation'])
+    df['cloudiness'] = df['cloudiness'].clip(0, 1)  # Ensure values are between 0 and 1
+    
+    return df
+
+def plot_radiation_comparison(df, station_name, year):
+    """Create enhanced comparison plot for measured vs clear sky radiation"""
+    plt.figure(figsize=(15, 8))
+    
+    # Plot measured and modeled radiation
+    plt.plot(df['date'], df['KC'], 'b-', label='Measured', alpha=0.7, linewidth=1)
+    plt.plot(df['date'], df['clear_sky_radiation'], 'r-', 
+            label='Clear Sky (Theoretical)', alpha=0.7, linewidth=1)
+    
+    # Add shaded area between curves
+    plt.fill_between(df['date'], df['KC'], df['clear_sky_radiation'], 
+                    color='gray', alpha=0.2, label='Difference')
+    
+    # Enhance the plot
+    plt.title(f'Radiation Comparison - {station_name.upper()} {year}', 
+             fontsize=14, pad=20)
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Radiation (W/m²)', fontsize=12)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    
+    # Format dates on x-axis
+    plt.gcf().autofmt_xdate()
+    
+    # Add legend
+    plt.legend(loc='upper right', fontsize=10)
+    
+    # Add text box with statistics
+    stats_text = (f'Mean measured: {df["KC"].mean():.1f} W/m²\n'
+                 f'Mean clear-sky: {df["clear_sky_radiation"].mean():.1f} W/m²\n'
+                 f'Mean cloudiness: {df["cloudiness"].mean():.2f}')
+    plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_cloudiness(df, station_name, year):
+    """Create enhanced cloudiness visualization"""
+    plt.figure(figsize=(15, 5))
+    
+    # Plot cloudiness index
+    plt.plot(df['date'], df['cloudiness'], color='navy', 
+            alpha=0.7, linewidth=1)
+    plt.fill_between(df['date'], df['cloudiness'], 
+                    alpha=0.3, color='navy')
+    
+    # Enhance the plot
+    plt.title(f'Cloudiness Index - {station_name.upper()} {year}', 
+             fontsize=14, pad=20)
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Cloudiness Index', fontsize=12)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    
+    # Format dates on x-axis
+    plt.gcf().autofmt_xdate()
+    
+    # Add text box with statistics
+    stats_text = (f'Mean cloudiness: {df["cloudiness"].mean():.2f}\n'
+                 f'Max cloudiness: {df["cloudiness"].max():.2f}\n'
+                 f'Min cloudiness: {df["cloudiness"].min():.2f}')
+    plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    plt.show()
+    
+def create_multi_station_comparison(all_data):
+    """Create a comparison plot for all stations in a given year"""
+    years = set()
+    for station_data in all_data:
+        years.add(station_data['year'])
+    
+    for year in years:
+        year_data = [data for data in all_data if data['year'] == year]
+        
+        plt.figure(figsize=(15, 10))
+        
+        for idx, data in enumerate(year_data):
+            plt.subplot(len(year_data), 1, idx + 1)
+            
+            df = data['df']
+            station = data['station']
+            
+            plt.plot(df['date'], df['KC'], 'b-', 
+                    label='Measured', alpha=0.7, linewidth=1)
+            plt.plot(df['date'], df['clear_sky_radiation'], 'r-',
+                    label='Clear Sky', alpha=0.7, linewidth=1)
+            
+            plt.title(f'{station.upper()}', fontsize=12)
+            plt.ylabel('Radiation (W/m²)')
+            
+            if idx == len(year_data) - 1:
+                plt.xlabel('Date')
+            
+            plt.grid(True, alpha=0.3, linestyle='--')
+            plt.legend()
+        
+        plt.suptitle(f'Radiation Comparison - All Stations {year}', 
+                    fontsize=14, y=1.02)
+        plt.tight_layout()
+        plt.show()
+
+def main():
+    """Main execution function"""
+    all_data = []  # Store all processed data for multi-station comparison
+    
+    for station_name, config in STATIONS.items():
+        for year in config['years']:
+            print(f"\nProcessing {station_name.upper()} {year}...")
+            
+            try:
+                # Process data
+                df = process_station_data(station_name, year)
+                
+                # Store data for multi-station comparison
+                all_data.append({
+                    'station': station_name,
+                    'year': year,
+                    'df': df
+                })
+                
+                # Display individual station plots
+                plot_radiation_comparison(df, station_name, year)
+                plot_cloudiness(df, station_name, year)
+                
+                # Save processed data
+                output_path = f"{station_name}_{year}_with_cloudiness.csv"
+                df.to_csv(output_path, index=False)
+                print(f"Saved processed data to {output_path}")
+                
+                # Print summary statistics
+                print(f"\nSummary Statistics for {station_name.upper()} {year}:")
+                print(f"Mean measured radiation: {df['KC'].mean():.2f} W/m²")
+                print(f"Mean clear sky radiation: {df['clear_sky_radiation'].mean():.2f} W/m²")
+                print(f"Mean cloudiness index: {df['cloudiness'].mean():.2f}")
+                
+            except Exception as e:
+                print(f"Error processing {station_name} {year}: {str(e)}")
+    
+    # Create and display multi-station comparison plots
+    create_multi_station_comparison(all_data)
+    print("\nAnalysis complete!")
+
+if __name__ == "__main__":
+    main()

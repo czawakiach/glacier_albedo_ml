@@ -1,0 +1,278 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.impute import SimpleImputer
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import xgboost as xgb  # Import XGBoost
+
+def load_and_combine_data(train_files, test_files):
+    """
+    Load and combine data separately for training and testing sets
+    """
+    # Load training data
+    train_dfs = []
+    for file_path in train_files:
+        df = pd.read_csv(file_path)
+        train_dfs.append(df)
+    
+    # Load testing data
+    test_dfs = []
+    for file_path in test_files:
+        df = pd.read_csv(file_path)
+        test_dfs.append(df)
+    
+    return pd.concat(train_dfs, ignore_index=True), pd.concat(test_dfs, ignore_index=True)
+
+def filter_season(df, year_col='year', doy_col='day_of_year'):
+    """
+    Filter dataframe to keep data from April 8th to September 4th
+    """
+    spring_start_doy = 98   # April 8th
+    end_date_doy = 247      # September 4th
+    
+    season_mask = (df[doy_col] >= spring_start_doy) & (df[doy_col] <= end_date_doy)
+    return df[season_mask].copy()
+
+def prepare_data(train_files, test_files):
+    """
+    Load and prepare data for training (2010 hans4/hans9, 2012 werenskiold) 
+    and testing (2011 all stations)
+    """
+    # Load and combine training and testing data separately
+    train_df, test_df = load_and_combine_data(train_files, test_files)
+    
+    # Filter for extended season
+    train_df = filter_season(train_df)
+    test_df = filter_season(test_df)
+    
+    # Define feature columns
+    feature_cols = ['snowfall_probability', 'daily_positive_temp','pdd', 'day_of_year']
+    
+    # Prepare training data
+    X_train = train_df[feature_cols]
+    y_train = train_df['albedo']
+    
+    # Prepare testing data
+    X_test = test_df[feature_cols]
+    y_test = test_df['albedo']
+    
+    # Handle missing values in features
+    feature_imputer = SimpleImputer(strategy='mean')
+    X_train_clean = pd.DataFrame(
+        feature_imputer.fit_transform(X_train),
+        columns=X_train.columns,
+        index=X_train.index
+    )
+    X_test_clean = pd.DataFrame(
+        feature_imputer.transform(X_test),
+        columns=X_test.columns,
+        index=X_test.index
+    )
+    
+    # Handle missing values in target
+    target_imputer = SimpleImputer(strategy='mean')
+    y_train_clean = pd.Series(
+        target_imputer.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
+        index=y_train.index
+    )
+    y_test_clean = pd.Series(
+        target_imputer.transform(y_test.values.reshape(-1, 1)).ravel(),
+        index=y_test.index
+    )
+    
+    # Print information about missing values
+    print("\nMissing values summary before imputation:")
+    print("\nFeatures (X_train):")
+    print(X_train.isna().sum())
+    print("\nTarget (y_train):")
+    print(f"Missing values in y_train: {y_train.isna().sum()}")
+    
+    return X_train_clean, X_test_clean, y_train_clean, y_test_clean, test_df
+
+def train_and_evaluate_xgboost(X_train, X_test, y_train, y_test, test_data):
+    """
+    Train XGBoost model and evaluate performance
+    """
+    # XGBoost parameters - you can tune these based on your specific needs
+    params = {
+        'objective': 'reg:squarederror',  # regression with squared error
+        'learning_rate': 0.1,
+        'max_depth': 5,
+        'min_child_weight': 1,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'n_estimators': 100,
+        'random_state': 42
+    }
+    
+    # Train model
+    model = xgb.XGBRegressor(**params)
+    model.fit(X_train, y_train)
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    
+    # Calculate overall metrics
+    r2 = r2_score(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    
+    # Calculate station-specific metrics
+    station_metrics = {}
+    for station in test_data['station'].unique():
+        mask = test_data['station'] == station
+        station_indices = test_data[mask].index
+        
+        # Get the corresponding y_test and y_pred values
+        station_y_test = y_test.loc[station_indices]
+        station_y_pred = y_pred[np.isin(y_test.index, station_indices)]
+        
+        station_metrics[station] = {
+            'R2': r2_score(station_y_test, station_y_pred),
+            'RMSE': np.sqrt(mean_squared_error(station_y_test, station_y_pred))
+        }
+    
+    # Get feature importance
+    feature_importance = dict(zip(X_train.columns, model.feature_importances_))
+    
+    # Add normalized feature importance
+    total_importance = sum(model.feature_importances_)
+    normalized_importance = {feature: importance/total_importance 
+                           for feature, importance in feature_importance.items()}
+    
+    return model, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance
+
+def plot_predicted_vs_measured(y_test, y_pred, test_data):
+    """
+    Create scatter plot of predicted vs measured albedo values
+    """
+    plt.figure(figsize=(12, 8))
+    
+    # Plot by station
+    for station in test_data['station'].unique():
+        mask = test_data['station'] == station
+        station_indices = test_data[mask].index
+        
+        plt.scatter(
+            y_test.loc[station_indices], 
+            y_pred[np.isin(y_test.index, station_indices)], 
+            alpha=0.6, 
+            label=station
+        )
+    
+    # Add perfect prediction line
+    line = np.linspace(min(y_test), max(y_test), 100)
+    plt.plot(line, line, 'k--', alpha=0.5, label='1:1 line')
+    
+    plt.xlabel('Measured Albedo')
+    plt.ylabel('Predicted Albedo')
+    plt.title('XGBoost: Predicted vs Measured Albedo (2011 Test Data)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def plot_feature_importance(feature_importance):
+    """
+    Create bar plot of feature importance
+    """
+    plt.figure(figsize=(10, 6))
+    importance_df = pd.DataFrame({
+        'Feature': feature_importance.keys(),
+        'Importance': feature_importance.values()
+    })
+    importance_df = importance_df.sort_values('Importance', ascending=True)
+    
+    plt.barh(importance_df['Feature'], importance_df['Importance'])
+    plt.xlabel('Importance Score')
+    plt.title('XGBoost Feature Importance')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def plot_station_time_series(station_name, test_data, y_test, y_pred):
+    """
+    Plot time series comparison for a specific station
+    """
+    mask = test_data['station'] == station_name
+    station_indices = test_data[mask].index
+    
+    station_data = test_data[mask]
+    station_measured = y_test.loc[station_indices]
+    station_predicted = y_pred[np.isin(y_test.index, station_indices)]
+    
+    plt.figure(figsize=(12, 6))
+    
+    # Sort by day of year
+    sort_idx = np.argsort(station_data['day_of_year'].values)
+    days = station_data['day_of_year'].values[sort_idx]
+    measured = station_measured.values[sort_idx]
+    predicted = station_predicted[sort_idx]
+    
+    plt.plot(days, measured, 'b-', label='Measured', linewidth=2)
+    plt.plot(days, predicted, 'r--', label='Predicted', linewidth=2)
+    
+    plt.xlabel('Day of Year')
+    plt.ylabel('Albedo')
+    plt.title(f'Albedo Time Series for {station_name} (2011)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    # Define training and testing file paths
+    train_files = [
+        "hans4_2010_processed_with_pdd.csv",
+        "hans9_2010_processed_with_pdd.csv",
+        "werenskiold_2012_processed_with_pdd.csv",
+        #"hans4_2011_processed_with_pdd.csv",
+        #"hans9_2011_processed_with_pdd.csv",
+        #"werenskiold_2011_processed_with_pdd.csv"
+    ]
+    
+    test_files = [
+        "hans4_2011_processed_with_pdd.csv",
+        "hans9_2011_processed_with_pdd.csv",
+        "werenskiold_2011_processed_with_pdd.csv"
+    ]
+    
+    # Load and prepare data
+    X_train_clean, X_test_clean, y_train_clean, y_test_clean, test_data_clean = prepare_data(
+        train_files, test_files
+    )
+    
+    # Train and evaluate XGBoost model
+    model, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance = train_and_evaluate_xgboost(
+        X_train_clean, X_test_clean, y_train_clean, y_test_clean, test_data_clean
+    )
+    
+    # Print results
+    print("\nExtended Season XGBoost Results (April 8 - September 4)")
+    print("-" * 50)
+    print(f"Overall Model Performance:")
+    print(f"R² Score: {r2:.3f}")
+    print(f"RMSE: {rmse:.3f}")
+    print("\nStation-specific Performance:")
+    for station, metrics in station_metrics.items():
+        print(f"\n{station}:")
+        print(f"R² Score: {metrics['R2']:.3f}")
+        print(f"RMSE: {metrics['RMSE']:.3f}")
+    print("\nFeature Importance:")
+    for feature in feature_importance:
+        print(f"{feature}:")
+        print(f"  Importance: {feature_importance[feature]:.3f}")
+        print(f"  Normalized Importance: {normalized_importance[feature]:.3f}")
+    
+    # Create plots
+    plot_predicted_vs_measured(y_test_clean, y_pred, test_data_clean)
+    plot_feature_importance(feature_importance)
+    
+    # Create individual station time series plots
+    for station in test_data_clean['station'].unique():
+        plot_station_time_series(station, test_data_clean, y_test_clean, y_pred)
+
+if __name__ == "__main__":
+    main()

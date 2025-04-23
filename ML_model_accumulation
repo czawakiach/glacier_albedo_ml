@@ -1,9 +1,11 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import GridSearchCV
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
@@ -49,7 +51,7 @@ def prepare_data(train_files, test_files):
     test_df = filter_season(test_df)
     
     # Define feature columns
-    feature_cols = ['snowfall_probability', 'TC']
+    feature_cols = ['TC', 'pdd', 'day_of_year', 'snowfall_probability']
     
     # Prepare training data
     X_train = train_df[feature_cols]
@@ -92,16 +94,33 @@ def prepare_data(train_files, test_files):
     
     return X_train_clean, X_test_clean, y_train_clean, y_test_clean, test_df
 
-def train_and_evaluate_model(X_train, X_test, y_train, y_test, test_data):
+def train_and_evaluate_mlp(X_train, X_test, y_train, y_test, test_data):
     """
-    Train linear regression model and evaluate performance
+    Train MLP Regressor model and evaluate performance
     """
+    # Scale features for better MLP performance
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Define MLP model
+    # You can adjust these hyperparameters
+    mlp = MLPRegressor(
+        hidden_layer_sizes=(100, 50),  # Two hidden layers with 100 and 50 neurons
+        activation='relu',             # ReLU activation function
+        solver='adam',                 # Adam optimizer
+        alpha=0.0001,                  # L2 regularization term
+        max_iter=1000,                 # Maximum number of iterations
+        early_stopping=True,           # Use early stopping
+        validation_fraction=0.1,       # Fraction of training data for validation
+        random_state=42                # For reproducibility
+    )
+    
     # Train model
-    model = LinearRegression()
-    model.fit(X_train, y_train)
+    mlp.fit(X_train_scaled, y_train)
     
     # Make predictions
-    y_pred = model.predict(X_test)
+    y_pred = mlp.predict(X_test_scaled)
     
     # Calculate overall metrics
     r2 = r2_score(y_test, y_pred)
@@ -119,15 +138,31 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test, test_data):
             'RMSE': np.sqrt(mean_squared_error(station_y_test, station_y_pred))
         }
     
-    # Get feature importance
-    feature_importance = dict(zip(X_train.columns, model.coef_))
+    # For feature importance, use permutation importance or other approaches
+    # (This is just a placeholder - see the additional function below)
+    feature_importance = {}
+    normalized_importance = {}
     
-    # Add normalized feature importance
-    abs_coefficients = np.abs(model.coef_)
-    normalized_importance = abs_coefficients / np.sum(abs_coefficients)
-    normalized_importance = dict(zip(X_train.columns, normalized_importance))
+    return mlp, scaler, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance
+
+def calculate_feature_importance(model, X_test_scaled, y_test, feature_names):
+    """
+    Calculate feature importance using permutation importance
+    """
+    from sklearn.inspection import permutation_importance
     
-    return model, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance
+    # Calculate permutation importance
+    perm_importance = permutation_importance(model, X_test_scaled, y_test, n_repeats=10, random_state=42)
+    
+    # Store feature importance
+    feature_importance = dict(zip(feature_names, perm_importance.importances_mean))
+    
+    # Normalize importance
+    total_importance = sum(perm_importance.importances_mean)
+    normalized_importance = {feature: importance / total_importance 
+                            for feature, importance in feature_importance.items()}
+    
+    return feature_importance, normalized_importance
 
 def plot_predicted_vs_measured(y_test, y_pred, test_data):
     """
@@ -146,7 +181,7 @@ def plot_predicted_vs_measured(y_test, y_pred, test_data):
     
     plt.xlabel('Measured Albedo')
     plt.ylabel('Predicted Albedo')
-    plt.title('Linear Regression: Predicted vs Measured Albedo (2011 Test Data)')
+    plt.title('MLP Regressor: Predicted vs Measured Albedo (2011 Test Data)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -159,13 +194,13 @@ def plot_feature_importance(feature_importance):
     plt.figure(figsize=(10, 6))
     importance_df = pd.DataFrame({
         'Feature': feature_importance.keys(),
-        'Coefficient': feature_importance.values()
+        'Importance': feature_importance.values()
     })
-    importance_df = importance_df.sort_values('Coefficient', key=abs, ascending=True)
+    importance_df = importance_df.sort_values('Importance', ascending=True)
     
-    plt.barh(importance_df['Feature'], importance_df['Coefficient'])
-    plt.xlabel('Coefficient Value')
-    plt.title('Linear Regression Feature Coefficients')
+    plt.barh(importance_df['Feature'], importance_df['Importance'])
+    plt.xlabel('Importance Value')
+    plt.title('MLP Regressor Feature Importance')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
@@ -199,6 +234,39 @@ def plot_station_time_series(station_name, test_data, y_test, y_pred):
     plt.tight_layout()
     plt.show()
 
+def optimize_mlp_hyperparameters(X_train, y_train):
+    """
+    Perform grid search to find optimal MLP hyperparameters
+    """
+    # Scale features for better MLP performance
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    
+    # Define parameter grid
+    param_grid = {
+        'hidden_layer_sizes': [(50,), (100,), (50, 50), (100, 50), (100, 100)],
+        'activation': ['relu', 'tanh'],
+        'alpha': [0.0001, 0.001, 0.01],
+        'learning_rate_init': [0.001, 0.01]
+    }
+    
+    # Create GridSearchCV object
+    grid_search = GridSearchCV(
+        MLPRegressor(max_iter=1000, early_stopping=True, random_state=42),
+        param_grid,
+        cv=5,
+        scoring='neg_mean_squared_error',
+        n_jobs=-1
+    )
+    
+    # Perform grid search
+    grid_search.fit(X_train_scaled, y_train)
+    
+    # Get best parameters
+    best_params = grid_search.best_params_
+    
+    return best_params, scaler
+
 def main():
     # Define training and testing file paths
     train_files = [
@@ -221,13 +289,26 @@ def main():
         train_files, test_files
     )
     
+    # Uncomment to perform hyperparameter tuning (can be time-consuming)
+    # print("\nOptimizing MLP hyperparameters...")
+    # best_params, scaler = optimize_mlp_hyperparameters(X_train_clean, y_train_clean)
+    # print(f"Best hyperparameters: {best_params}")
+    
     # Train and evaluate model
-    model, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance = train_and_evaluate_model(
+    print("\nTraining MLP Regressor model...")
+    mlp, scaler, y_pred, r2, rmse, station_metrics, _, _ = train_and_evaluate_mlp(
         X_train_clean, X_test_clean, y_train_clean, y_test_clean, test_data_clean
     )
     
+    # Calculate feature importance
+    print("\nCalculating feature importance...")
+    X_test_scaled = scaler.transform(X_test_clean)
+    feature_importance, normalized_importance = calculate_feature_importance(
+        mlp, X_test_scaled, y_test_clean, X_train_clean.columns
+    )
+    
     # Print results
-    print("\nExtended Season Linear Regression Results (April 8 - September 4)")
+    print("\nExtended Season MLP Regressor Results (April 8 - September 4)")
     print("-" * 50)
     print(f"Overall Model Performance:")
     print(f"R² Score: {r2:.3f}")
@@ -240,7 +321,7 @@ def main():
     print("\nFeature Importance:")
     for feature in feature_importance:
         print(f"{feature}:")
-        print(f"  Coefficient: {feature_importance[feature]:.3f}")
+        print(f"  Importance: {feature_importance[feature]:.3f}")
         print(f"  Normalized Importance: {normalized_importance[feature]:.3f}")
     
     # Create plots

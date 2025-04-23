@@ -49,7 +49,7 @@ def prepare_data(train_files, test_files):
     test_df = filter_season(test_df)
     
     # Define feature columns
-    feature_cols = ['snowfall_probability', 'daily_positive_temp','pdd']
+    feature_cols = [ 'day_of_year', 'daily_positive_temp','pdd', 'snowfall_probability']
     
     # Prepare training data
     X_train = train_df[feature_cols]

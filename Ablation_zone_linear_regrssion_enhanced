@@ -1,0 +1,515 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.impute import SimpleImputer
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+
+def create_temporal_features(df, temporal_window=3, lag_days=[1, 2, 3]):
+    """
+    Create temporal features including moving averages and lag effects
+    
+    Parameters:
+    - temporal_window: days for moving average calculation
+    - lag_days: list of lag days to include
+    """
+    df = df.copy()
+    df = df.sort_values(['station', 'day_of_year']).reset_index(drop=True)
+    
+    # Group by station to handle each station separately
+    enhanced_dfs = []
+    
+    for station in df['station'].unique():
+        station_df = df[df['station'] == station].copy()
+        station_df = station_df.sort_values('day_of_year').reset_index(drop=True)
+        
+        # Create moving averages
+        for var in ['TC', 'pdd', 'snowfall_probability']:
+            # Moving average
+            station_df[f'{var}_ma{temporal_window}'] = station_df[var].rolling(
+                window=temporal_window, min_periods=1, center=True
+            ).mean()
+            
+            # Trend (difference between current and moving average)
+            station_df[f'{var}_trend'] = station_df[var] - station_df[f'{var}_ma{temporal_window}']
+        
+        # Create lag features
+        for lag in lag_days:
+            for var in ['TC', 'pdd', 'snowfall_probability', 'albedo']:
+                station_df[f'{var}_lag{lag}'] = station_df[var].shift(lag)
+        
+        # Cumulative variables (season-to-date)
+        station_df['cumulative_pdd'] = station_df['pdd'].cumsum()
+        station_df['cumulative_snowfall'] = station_df['snowfall_probability'].cumsum()
+        
+        # Days since last snowfall
+        station_df['days_since_snowfall'] = 0
+        snowfall_threshold = 0.3  # Threshold for significant snowfall probability
+        
+        days_counter = 0
+        for i in range(len(station_df)):
+            if station_df.iloc[i]['snowfall_probability'] > snowfall_threshold:
+                days_counter = 0
+            else:
+                days_counter += 1
+            station_df.loc[station_df.index[i], 'days_since_snowfall'] = days_counter
+        
+        # Temperature persistence (consecutive days above/below freezing)
+        station_df['temp_persistence'] = 0
+        current_streak = 0
+        last_sign = 0
+        
+        for i in range(len(station_df)):
+            temp = station_df.iloc[i]['TC']
+            current_sign = 1 if temp > 0 else -1
+            
+            if i == 0 or current_sign == last_sign:
+                current_streak += 1
+            else:
+                current_streak = 1
+            
+            station_df.loc[station_df.index[i], 'temp_persistence'] = current_streak * current_sign
+            last_sign = current_sign
+        
+        # Albedo decay rate (change from previous day)
+        station_df['albedo_change'] = station_df['albedo'].diff()
+        station_df['albedo_change_ma3'] = station_df['albedo_change'].rolling(
+            window=3, min_periods=1
+        ).mean()
+        
+        enhanced_dfs.append(station_df)
+    
+    return pd.concat(enhanced_dfs, ignore_index=True)
+
+def load_and_combine_data_enhanced(train_files, test_files):
+    """
+    Load and combine data with enhanced temporal features
+    """
+    # Load training data
+    train_dfs = []
+    for file_path in train_files:
+        df = pd.read_csv(file_path)
+        train_dfs.append(df)
+    
+    # Load testing data
+    test_dfs = []
+    for file_path in test_files:
+        df = pd.read_csv(file_path)
+        test_dfs.append(df)
+    
+    train_combined = pd.concat(train_dfs, ignore_index=True)
+    test_combined = pd.concat(test_dfs, ignore_index=True)
+    
+    # Create temporal features
+    print("Creating temporal features for training data...")
+    train_enhanced = create_temporal_features(train_combined)
+    
+    print("Creating temporal features for testing data...")
+    test_enhanced = create_temporal_features(test_combined)
+    
+    return train_enhanced, test_enhanced
+
+def filter_season(df, year_col='year', doy_col='day_of_year'):
+    """
+    Filter dataframe to keep data from April 8th to September 4th
+    """
+    spring_start_doy = 98   # April 8th
+    end_date_doy = 247      # September 4th
+    
+    season_mask = (df[doy_col] >= spring_start_doy) & (df[doy_col] <= end_date_doy)
+    return df[season_mask].copy()
+
+def prepare_enhanced_data(train_files, test_files, model_version='enhanced'):
+    """
+    Prepare data with different feature sets based on model version
+    """
+    # Load and combine training and testing data with temporal features
+    train_df, test_df = load_and_combine_data_enhanced(train_files, test_files)
+    
+    # Filter for extended season
+    train_df = filter_season(train_df)
+    test_df = filter_season(test_df)
+    
+    # Define different feature sets
+    if model_version == 'basic':
+        feature_cols = ['day_of_year', 'TC', 'pdd', 'snowfall_probability']
+    
+    elif model_version == 'temporal':
+        feature_cols = [
+            'day_of_year', 'TC', 'pdd', 'snowfall_probability',
+            'TC_ma3', 'pdd_ma3', 'snowfall_probability_ma3',
+            'TC_trend', 'pdd_trend', 'snowfall_probability_trend'
+        ]
+    
+    elif model_version == 'lag':
+        feature_cols = [
+            'day_of_year', 'TC', 'pdd', 'snowfall_probability',
+            'TC_lag1', 'TC_lag2', 'pdd_lag1', 'pdd_lag2',
+            'snowfall_probability_lag1', 'albedo_lag1', 'albedo_lag2'
+        ]
+    
+    elif model_version == 'enhanced':
+        feature_cols = [
+            # Basic features
+            'day_of_year', 'TC', 'pdd', 'snowfall_probability',
+            # Moving averages
+            'TC_ma3', 'pdd_ma3', 'snowfall_probability_ma3',
+            # Trends
+            'TC_trend', 'pdd_trend',
+            # Lag effects
+            'TC_lag1', 'pdd_lag1', 'snowfall_probability_lag1', 'albedo_lag1',
+            # Cumulative and derived features
+            'cumulative_pdd', 'days_since_snowfall', 'temp_persistence'
+        ]
+    
+    else:
+        raise ValueError("Model version must be 'basic', 'temporal', 'lag', or 'enhanced'")
+    
+    print(f"\nUsing {model_version} model with {len(feature_cols)} features:")
+    print(feature_cols)
+    
+    # Prepare training data
+    X_train = train_df[feature_cols]
+    y_train = train_df['albedo']
+    
+    # Prepare testing data
+    X_test = test_df[feature_cols]
+    y_test = test_df['albedo']
+    
+    # Handle missing values in features
+    feature_imputer = SimpleImputer(strategy='mean')
+    X_train_clean = pd.DataFrame(
+        feature_imputer.fit_transform(X_train),
+        columns=X_train.columns,
+        index=X_train.index
+    )
+    X_test_clean = pd.DataFrame(
+        feature_imputer.transform(X_test),
+        columns=X_test.columns,
+        index=X_test.index
+    )
+    
+    # Handle missing values in target
+    target_imputer = SimpleImputer(strategy='mean')
+    y_train_clean = pd.Series(
+        target_imputer.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
+        index=y_train.index
+    )
+    y_test_clean = pd.Series(
+        target_imputer.transform(y_test.values.reshape(-1, 1)).ravel(),
+        index=y_test.index
+    )
+    
+    # Print information about missing values
+    print(f"\nMissing values summary for {model_version} model:")
+    print("Features (X_train):")
+    missing_features = X_train.isna().sum()
+    print(missing_features[missing_features > 0])
+    if missing_features.sum() == 0:
+        print("No missing values in features")
+    
+    return X_train_clean, X_test_clean, y_train_clean, y_test_clean, test_df
+
+def train_and_evaluate_enhanced_model(X_train, X_test, y_train, y_test, test_data, model_name="Enhanced"):
+    """
+    Train linear regression model with enhanced features and evaluate performance
+    """
+    # Train model
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    
+    # Calculate overall metrics
+    r2 = r2_score(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    
+    # Calculate station-specific metrics
+    station_metrics = {}
+    for station in test_data['station'].unique():
+        mask = test_data['station'] == station
+        station_y_test = y_test[mask]
+        station_y_pred = y_pred[mask]
+        
+        if len(station_y_test) > 0:
+            station_metrics[station] = {
+                'R2': r2_score(station_y_test, station_y_pred),
+                'RMSE': np.sqrt(mean_squared_error(station_y_test, station_y_pred)),
+                'n_points': len(station_y_test)
+            }
+    
+    # Get feature importance
+    feature_importance = dict(zip(X_train.columns, model.coef_))
+    
+    # Add normalized feature importance
+    abs_coefficients = np.abs(model.coef_)
+    normalized_importance = abs_coefficients / np.sum(abs_coefficients)
+    normalized_importance = dict(zip(X_train.columns, normalized_importance))
+    
+    return model, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance
+
+def compare_models(train_files, test_files):
+    """
+    Compare different model versions
+    """
+    model_versions = ['basic', 'temporal', 'lag', 'enhanced']
+    results = {}
+    
+    for version in model_versions:
+        print(f"\n{'='*50}")
+        print(f"Training {version.upper()} model...")
+        print(f"{'='*50}")
+        
+        try:
+            # Prepare data
+            X_train, X_test, y_train, y_test, test_data = prepare_enhanced_data(
+                train_files, test_files, model_version=version
+            )
+            
+            # Train and evaluate
+            model, y_pred, r2, rmse, station_metrics, feature_importance, normalized_importance = train_and_evaluate_enhanced_model(
+                X_train, X_test, y_train, y_test, test_data, model_name=version
+            )
+            
+            results[version] = {
+                'model': model,
+                'r2': r2,
+                'rmse': rmse,
+                'station_metrics': station_metrics,
+                'feature_importance': feature_importance,
+                'normalized_importance': normalized_importance,
+                'y_pred': y_pred,
+                'y_test': y_test,
+                'test_data': test_data,
+                'X_test': X_test
+            }
+            
+            # Print results
+            print(f"\n{version.upper()} Model Performance:")
+            print(f"Overall R² Score: {r2:.3f}")
+            print(f"Overall RMSE: {rmse:.3f}")
+            
+            print(f"\nStation-specific Performance:")
+            for station, metrics in station_metrics.items():
+                print(f"{station}: R²={metrics['R2']:.3f}, RMSE={metrics['RMSE']:.3f}, n={metrics['n_points']}")
+            
+            # Show top 5 most important features
+            sorted_importance = sorted(normalized_importance.items(), key=lambda x: x[1], reverse=True)
+            print(f"\nTop 5 Features (normalized importance):")
+            for i, (feature, importance) in enumerate(sorted_importance[:5]):
+                print(f"{i+1}. {feature}: {importance:.3f} (coef: {feature_importance[feature]:.4f})")
+                
+        except Exception as e:
+            print(f"Error training {version} model: {e}")
+            results[version] = None
+    
+    return results
+
+def plot_station_time_series_enhanced(station_name, test_data, y_test, y_pred, model_name="Enhanced"):
+    """
+    Plot time series comparison for a specific station with enhanced model
+    """
+    mask = test_data['station'] == station_name
+    
+    station_data = test_data[mask]
+    station_measured = y_test[mask]
+    station_predicted = y_pred[mask]
+    
+    plt.figure(figsize=(14, 8))
+    
+    # Sort by day of year
+    sort_idx = np.argsort(station_data['day_of_year'])
+    days = station_data['day_of_year'].values[sort_idx]
+    measured = station_measured.values[sort_idx]
+    predicted = station_predicted[sort_idx]
+    
+    # Main plot
+    plt.subplot(2, 1, 1)
+    plt.plot(days, measured, 'b-', label='Measured', linewidth=2, alpha=0.8)
+    plt.plot(days, predicted, 'r--', label='Predicted', linewidth=2, alpha=0.8)
+    
+    plt.xlabel('Day of Year')
+    plt.ylabel('Albedo')
+    plt.title(f'{model_name} Model: Albedo Time Series for {station_name} (2011)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Residuals plot
+    plt.subplot(2, 1, 2)
+    residuals = measured - predicted
+    plt.plot(days, residuals, 'g-', linewidth=1, alpha=0.7)
+    plt.axhline(y=0, color='k', linestyle='-', alpha=0.5)
+    plt.fill_between(days, residuals, alpha=0.3, color='green')
+    
+    plt.xlabel('Day of Year')
+    plt.ylabel('Residuals (Measured - Predicted)')
+    plt.title(f'Prediction Residuals for {station_name}')
+    plt.grid(True, alpha=0.3)
+    
+    # Add statistics
+    r2 = r2_score(measured, predicted)
+    rmse = np.sqrt(mean_squared_error(measured, predicted))
+    plt.text(0.02, 0.98, f'R² = {r2:.3f}\nRMSE = {rmse:.3f}', 
+             transform=plt.gca().transAxes, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_model_comparison(results):
+    """
+    Create comparison plots for different model versions
+    """
+    # Filter out failed models
+    valid_results = {k: v for k, v in results.items() if v is not None}
+    
+    if len(valid_results) == 0:
+        print("No valid results to plot")
+        return
+    
+    # Performance comparison
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # R² comparison
+    models = list(valid_results.keys())
+    r2_scores = [valid_results[model]['r2'] for model in models]
+    rmse_scores = [valid_results[model]['rmse'] for model in models]
+    
+    ax1.bar(models, r2_scores, color=['skyblue', 'lightcoral', 'lightgreen', 'gold'][:len(models)])
+    ax1.set_title('Model R² Comparison')
+    ax1.set_ylabel('R² Score')
+    ax1.set_ylim(0, 1)
+    for i, v in enumerate(r2_scores):
+        ax1.text(i, v + 0.01, f'{v:.3f}', ha='center')
+    
+    # RMSE comparison
+    ax2.bar(models, rmse_scores, color=['skyblue', 'lightcoral', 'lightgreen', 'gold'][:len(models)])
+    ax2.set_title('Model RMSE Comparison')
+    ax2.set_ylabel('RMSE')
+    for i, v in enumerate(rmse_scores):
+        ax2.text(i, v + 0.002, f'{v:.3f}', ha='center')
+    
+    # Scatter plot for best model
+    best_model = max(valid_results.keys(), key=lambda x: valid_results[x]['r2'])
+    best_result = valid_results[best_model]
+    
+    for station in best_result['test_data']['station'].unique():
+        mask = best_result['test_data']['station'] == station
+        ax3.scatter(best_result['y_test'][mask], best_result['y_pred'][mask], 
+                   alpha=0.6, label=station)
+    
+    # Perfect prediction line
+    line_vals = np.linspace(min(best_result['y_test']), max(best_result['y_test']), 100)
+    ax3.plot(line_vals, line_vals, 'k--', alpha=0.5, label='1:1 line')
+    ax3.set_xlabel('Measured Albedo')
+    ax3.set_ylabel('Predicted Albedo')
+    ax3.set_title(f'Best Model ({best_model.upper()}): Predicted vs Measured')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Feature importance for best model
+    importance = best_result['normalized_importance']
+    sorted_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:10]
+    features, importances = zip(*sorted_features)
+    
+    ax4.barh(range(len(features)), importances)
+    ax4.set_yticks(range(len(features)))
+    ax4.set_yticklabels(features)
+    ax4.set_xlabel('Normalized Importance')
+    ax4.set_title(f'Feature Importance ({best_model.upper()} Model)')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_all_model_time_series(results):
+    """
+    Plot time series for all models and stations
+    """
+    valid_results = {k: v for k, v in results.items() if v is not None}
+    
+    # Compare basic vs best enhanced model
+    if 'basic' in valid_results and len(valid_results) > 1:
+        # Find best model
+        best_model_name = max(valid_results.keys(), key=lambda x: valid_results[x]['r2'])
+        best_result = valid_results[best_model_name]
+        basic_result = valid_results['basic']
+        
+        print(f"\nComparing BASIC vs {best_model_name.upper()} models:")
+        print("="*60)
+        
+        # Plot for each station
+        for station in best_result['test_data']['station'].unique():
+            print(f"\nCreating time series plots for {station}...")
+            
+            # Basic model
+            plot_station_time_series_enhanced(
+                station, basic_result['test_data'], 
+                basic_result['y_test'], basic_result['y_pred'], 
+                model_name="BASIC"
+            )
+            
+            # Best model
+            plot_station_time_series_enhanced(
+                station, best_result['test_data'], 
+                best_result['y_test'], best_result['y_pred'], 
+                model_name=best_model_name.upper()
+            )
+
+def main():
+    """
+    Main function to run enhanced albedo modeling with temporal effects
+    """
+    # Define training and testing file paths
+    train_files = [
+        "hans4_2010_processed_with_pdd.csv",
+        "hans9_2010_processed_with_pdd.csv",
+        "werenskiold_2012_processed_with_pdd.csv"
+    ]
+    
+    test_files = [
+        "hans4_2011_processed_with_pdd.csv",
+        "werenskiold_2011_processed_with_pdd.csv"
+    ]
+    
+    print("Enhanced Albedo Modeling with Temporal Resolution and Lag Effects")
+    print("="*70)
+    
+    # Compare different model versions
+    results = compare_models(train_files, test_files)
+    
+    # Create comparison plots
+    plot_model_comparison(results)
+    
+    # Create seasonal time series plots
+    plot_all_model_time_series(results)
+    
+    # Summary of improvements
+    print(f"\n{'='*70}")
+    print("SUMMARY OF MODEL IMPROVEMENTS")
+    print(f"{'='*70}")
+    
+    valid_results = {k: v for k, v in results.items() if v is not None}
+    if 'basic' in valid_results and 'enhanced' in valid_results:
+        basic_r2 = valid_results['basic']['r2']
+        enhanced_r2 = valid_results['enhanced']['r2']
+        improvement = ((enhanced_r2 - basic_r2) / basic_r2) * 100
+        
+        print(f"Basic model R²: {basic_r2:.3f}")
+        print(f"Enhanced model R²: {enhanced_r2:.3f}")
+        print(f"Improvement: {improvement:.1f}%")
+        
+        basic_rmse = valid_results['basic']['rmse']
+        enhanced_rmse = valid_results['enhanced']['rmse']
+        rmse_improvement = ((basic_rmse - enhanced_rmse) / basic_rmse) * 100
+        
+        print(f"Basic model RMSE: {basic_rmse:.3f}")
+        print(f"Enhanced model RMSE: {enhanced_rmse:.3f}")
+        print(f"RMSE improvement: {rmse_improvement:.1f}%")
+
+if __name__ == "__main__":
+    main()

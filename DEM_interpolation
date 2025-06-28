@@ -15,16 +15,36 @@ warnings.filterwarnings('ignore')
 class SpatialAlbedoModel:
     """
     Class for spatial albedo modeling across glacier surfaces using DEM and AWS data
+    with configurable ELA (Equilibrium Line Altitude) for each glacier
     """
     
-    def __init__(self, dem_paths, aws_data_paths, station_elevations):
+    def __init__(self, dem_paths, aws_data_paths, station_elevations, glacier_elas=None):
         self.dem_paths = dem_paths
         self.aws_data_paths = aws_data_paths
         self.station_elevations = station_elevations
+        
+        # Set default ELA values or use user-provided ones
+        if glacier_elas is None:
+            self.glacier_elas = {
+                'Hansbreen': 410,
+                'Werenskioldbreen': 480
+            }
+        else:
+            self.glacier_elas = glacier_elas
+            
+        # Print ELA settings
+        print("ELA settings for glaciers:")
+        for glacier_name, ela in self.glacier_elas.items():
+            print(f"  {glacier_name}: {ela} m")
+        
         self.dems = {}
         self.aws_data = {}
         self.models = {}
         self.scalers = {}
+        
+    def get_ela_for_glacier(self, glacier_name):
+        """Get ELA for a specific glacier, with fallback to default"""
+        return self.glacier_elas.get(glacier_name, 400)  # Default fallback
         
     def load_dems(self):
         """Load DEM data for each glacier"""
@@ -58,6 +78,12 @@ class SpatialAlbedoModel:
                 if len(valid_elevation) > 0:
                     print(f"Valid elevation range: {np.min(valid_elevation):.1f} - {np.max(valid_elevation):.1f} m")
                     print(f"Valid pixels: {len(valid_elevation)} / {elevation.size}")
+                    
+                    # Check ELA coverage
+                    ela = self.get_ela_for_glacier(glacier_name)
+                    below_ela = np.sum(valid_elevation <= ela)
+                    above_ela = np.sum(valid_elevation > ela)
+                    print(f"Pixels below ELA ({ela}m): {below_ela} | above ELA: {above_ela}")
                 
             except Exception as e:
                 print(f"Error loading DEM for {glacier_name}: {e}")
@@ -101,12 +127,22 @@ class SpatialAlbedoModel:
         return slope, aspect
     
     def train_models_from_data(self):
-        """Train linear regression and MLP models using existing AWS data"""
+        """Train linear regression and MLP models using existing AWS data with glacier-specific ELAs"""
         # Combine all AWS data for training
         all_data = []
         for station_name, df in self.aws_data.items():
             station_df = df.copy()
             station_df['elevation'] = self.station_elevations[station_name]
+            
+            # Determine which glacier this station belongs to (based on name pattern)
+            if 'hans' in station_name.lower():
+                station_df['glacier'] = 'Hansbreen'
+            elif 'werenskiold' in station_name.lower():
+                station_df['glacier'] = 'Werenskioldbreen'
+            else:
+                # Default assignment if unclear
+                station_df['glacier'] = 'Unknown'
+            
             all_data.append(station_df)
         
         combined_df = pd.concat(all_data, ignore_index=True)
@@ -115,17 +151,39 @@ class SpatialAlbedoModel:
         combined_df = combined_df.dropna(subset=['albedo'])
         print(f"Training data after cleaning: {len(combined_df)} records")
         
-        # Define elevation threshold
-        elevation_threshold = 300  # meters
+        # Prepare data using glacier-specific ELAs
+        ablation_data = []
+        accumulation_data = []
         
-        # Prepare data for ablation zone (linear regression)
-        ablation_mask = combined_df['elevation'] <= elevation_threshold
-        ablation_data = combined_df[ablation_mask]
+        for glacier_name in self.glacier_elas.keys():
+            glacier_mask = combined_df['glacier'] == glacier_name
+            glacier_data = combined_df[glacier_mask]
+            
+            if len(glacier_data) > 0:
+                ela = self.get_ela_for_glacier(glacier_name)
+                
+                # Split data based on glacier-specific ELA
+                ablation_mask = glacier_data['elevation'] <= ela
+                accumulation_mask = glacier_data['elevation'] > ela
+                
+                ablation_subset = glacier_data[ablation_mask]
+                accumulation_subset = glacier_data[accumulation_mask]
+                
+                if len(ablation_subset) > 0:
+                    ablation_data.append(ablation_subset)
+                    print(f"{glacier_name}: {len(ablation_subset)} ablation zone samples (≤{ela}m)")
+                
+                if len(accumulation_subset) > 0:
+                    accumulation_data.append(accumulation_subset)
+                    print(f"{glacier_name}: {len(accumulation_subset)} accumulation zone samples (>{ela}m)")
         
-        if len(ablation_data) > 0:
+        # Combine ablation data from all glaciers
+        if ablation_data:
+            combined_ablation = pd.concat(ablation_data, ignore_index=True)
+            
             feature_cols = ['day_of_year', 'TC', 'pdd', 'snowfall_probability']
-            X_ablation = ablation_data[feature_cols]
-            y_ablation = ablation_data['albedo']
+            X_ablation = combined_ablation[feature_cols]
+            y_ablation = combined_ablation['albedo']
             
             # Handle missing values in features only
             imputer = SimpleImputer(strategy='mean')
@@ -136,17 +194,16 @@ class SpatialAlbedoModel:
             self.models['linear'].fit(X_ablation_clean, y_ablation)
             self.scalers['linear_imputer'] = imputer
             
-            print(f"Trained linear regression model for ablation zone with {len(ablation_data)} samples")
+            print(f"Trained linear regression model for ablation zones with {len(combined_ablation)} samples")
             print(f"Linear model R² score: {self.models['linear'].score(X_ablation_clean, y_ablation):.3f}")
         
-        # Prepare data for accumulation zone (MLP)
-        accumulation_mask = combined_df['elevation'] > elevation_threshold
-        accumulation_data = combined_df[accumulation_mask]
-        
-        if len(accumulation_data) > 0:
+        # Combine accumulation data from all glaciers
+        if accumulation_data:
+            combined_accumulation = pd.concat(accumulation_data, ignore_index=True)
+            
             feature_cols = ['TC', 'pdd', 'day_of_year', 'snowfall_probability']
-            X_accumulation = accumulation_data[feature_cols]
-            y_accumulation = accumulation_data['albedo']
+            X_accumulation = combined_accumulation[feature_cols]
+            y_accumulation = combined_accumulation['albedo']
             
             # Handle missing values and scaling
             imputer = SimpleImputer(strategy='mean')
@@ -171,7 +228,7 @@ class SpatialAlbedoModel:
             self.scalers['mlp_imputer'] = imputer
             self.scalers['mlp_scaler'] = scaler
             
-            print(f"Trained MLP model for accumulation zone with {len(accumulation_data)} samples")
+            print(f"Trained MLP model for accumulation zones with {len(combined_accumulation)} samples")
             
         else:
             print("Warning: No accumulation zone data available for MLP training")
@@ -269,10 +326,14 @@ class SpatialAlbedoModel:
         
         return interpolated_vars
     
-    def predict_spatial_albedo(self, glacier_name, target_date, elevation_threshold=300, day_of_year=None):
-        """Predict albedo across the glacier surface for a specific date"""
+    def predict_spatial_albedo(self, glacier_name, target_date, day_of_year=None):
+        """Predict albedo across the glacier surface for a specific date using glacier-specific ELA"""
         if day_of_year is None:
             day_of_year = target_date.timetuple().tm_yday
+        
+        # Get glacier-specific ELA
+        ela = self.get_ela_for_glacier(glacier_name)
+        print(f"Using ELA = {ela}m for {glacier_name}")
         
         # Get interpolated meteorological variables
         met_vars = self.interpolate_meteorological_variables(glacier_name, target_date)
@@ -295,8 +356,8 @@ class SpatialAlbedoModel:
         # Initialize albedo array
         albedo_predicted = np.full(shape, np.nan)
         
-        # Apply linear regression to ablation zone
-        ablation_mask = (elevation <= elevation_threshold) & ~np.isnan(elevation)
+        # Apply linear regression to ablation zone (below ELA)
+        ablation_mask = (elevation <= ela) & ~np.isnan(elevation)
         if np.any(ablation_mask) and 'linear' in self.models:
             ablation_features = np.column_stack([
                 features['day_of_year'][ablation_mask],
@@ -311,9 +372,11 @@ class SpatialAlbedoModel:
             # Predict
             albedo_ablation = self.models['linear'].predict(ablation_features_clean)
             albedo_predicted[ablation_mask] = albedo_ablation
+            
+            print(f"Applied linear regression to {np.sum(ablation_mask)} ablation zone pixels (≤{ela}m)")
         
-        # Apply MLP to accumulation zone
-        accumulation_mask = (elevation > elevation_threshold) & ~np.isnan(elevation)
+        # Apply MLP to accumulation zone (above ELA)
+        accumulation_mask = (elevation > ela) & ~np.isnan(elevation)
         if np.any(accumulation_mask) and 'mlp' in self.models:
             accumulation_features = np.column_stack([
                 features['TC'][accumulation_mask],
@@ -329,6 +392,8 @@ class SpatialAlbedoModel:
             # Predict
             albedo_accumulation = self.models['mlp'].predict(accumulation_features_scaled)
             albedo_predicted[accumulation_mask] = albedo_accumulation
+            
+            print(f"Applied MLP to {np.sum(accumulation_mask)} accumulation zone pixels (>{ela}m)")
         
         # Clip values to valid albedo range
         albedo_predicted = np.clip(albedo_predicted, 0, 1)
@@ -336,26 +401,37 @@ class SpatialAlbedoModel:
         return albedo_predicted
     
     def visualize_spatial_albedo(self, glacier_name, albedo_array, target_date, save_path=None, figsize=(12, 10)):
-        """Create visualization of spatial albedo distribution"""
+        """Create visualization of spatial albedo distribution with ELA line"""
         dem_data = self.dems[glacier_name]
         elevation = dem_data['elevation']
+        ela = self.get_ela_for_glacier(glacier_name)
         
         fig, axes = plt.subplots(1, 2, figsize=figsize)
         
-        # Plot elevation
+        # Plot elevation with ELA contour
         im1 = axes[0].imshow(elevation, cmap='terrain', alpha=0.8)
+        
+        # Add ELA contour line
+        contour = axes[0].contour(elevation, levels=[ela], colors='red', linewidths=2)
+        axes[0].clabel(contour, inline=True, fontsize=10, fmt=f'ELA={ela}m')
+        
         axes[0].set_title(f'{glacier_name} - Elevation (m)')
         axes[0].set_xlabel('Grid X')
         axes[0].set_ylabel('Grid Y')
         plt.colorbar(im1, ax=axes[0], shrink=0.8)
         
-        # Plot albedo
+        # Plot albedo with ELA contour
         albedo_cmap = LinearSegmentedColormap.from_list(
             'albedo', ['darkblue', 'blue', 'lightblue', 'white'], N=256
         )
         
         im2 = axes[1].imshow(albedo_array, cmap=albedo_cmap, vmin=0, vmax=1)
-        axes[1].set_title(f'{glacier_name} - Predicted Albedo\\n{target_date.strftime("%Y-%m-%d")}')
+        
+        # Add ELA contour line to albedo plot as well
+        contour2 = axes[1].contour(elevation, levels=[ela], colors='red', linewidths=2)
+        axes[1].clabel(contour2, inline=True, fontsize=10, fmt=f'ELA={ela}m')
+        
+        axes[1].set_title(f'{glacier_name} - Predicted Albedo\n{target_date.strftime("%Y-%m-%d")}')
         axes[1].set_xlabel('Grid X')
         axes[1].set_ylabel('Grid Y')
         plt.colorbar(im2, ax=axes[1], shrink=0.8, label='Albedo')
@@ -368,17 +444,23 @@ class SpatialAlbedoModel:
         
         plt.show()
         
-        # Print statistics
+        # Print statistics by zone
         valid_albedo = albedo_array[~np.isnan(albedo_array)]
+        ablation_albedo = albedo_array[(elevation <= ela) & ~np.isnan(albedo_array)]
+        accumulation_albedo = albedo_array[(elevation > ela) & ~np.isnan(albedo_array)]
+        
         if len(valid_albedo) > 0:
-            print(f"\\nAlbedo Statistics for {glacier_name}:")
-            print(f"Mean albedo: {np.mean(valid_albedo):.3f}")
-            print(f"Std albedo: {np.std(valid_albedo):.3f}")
-            print(f"Min albedo: {np.min(valid_albedo):.3f}")
-            print(f"Max albedo: {np.max(valid_albedo):.3f}")
+            print(f"\nAlbedo Statistics for {glacier_name} (ELA = {ela}m):")
+            print(f"Overall - Mean: {np.mean(valid_albedo):.3f}, Std: {np.std(valid_albedo):.3f}, Range: {np.min(valid_albedo):.3f}-{np.max(valid_albedo):.3f}")
+            
+            if len(ablation_albedo) > 0:
+                print(f"Ablation zone (≤{ela}m) - Mean: {np.mean(ablation_albedo):.3f}, Std: {np.std(ablation_albedo):.3f}, n={len(ablation_albedo)}")
+            
+            if len(accumulation_albedo) > 0:
+                print(f"Accumulation zone (>{ela}m) - Mean: {np.mean(accumulation_albedo):.3f}, Std: {np.std(accumulation_albedo):.3f}, n={len(accumulation_albedo)}")
     
     def create_validation_predictions(self, glacier_names=None):
-        """Create albedo predictions for validation dates (July 26 and August 20, 2011)"""
+        """Create albedo predictions for validation dates using glacier-specific ELAs"""
         if glacier_names is None:
             glacier_names = list(self.dems.keys())
         
@@ -393,10 +475,11 @@ class SpatialAlbedoModel:
             date_str = date.strftime('%Y-%m-%d')
             results[date_str] = {}
             
-            print(f"\\n=== Processing {date_str} ===")
+            print(f"\n=== Processing {date_str} ===")
             
             for glacier_name in glacier_names:
-                print(f"\\nPredicting albedo for {glacier_name}...")
+                ela = self.get_ela_for_glacier(glacier_name)
+                print(f"\nPredicting albedo for {glacier_name} (ELA = {ela}m)...")
                 
                 albedo_prediction = self.predict_spatial_albedo(glacier_name, date)
                 
@@ -404,41 +487,32 @@ class SpatialAlbedoModel:
                     results[date_str][glacier_name] = albedo_prediction
                     
                     # Create visualization
-                    save_path = f"{glacier_name}_albedo_{date.strftime('%Y%m%d')}.png"
+                    save_path = f"{glacier_name}_albedo_{date.strftime('%Y%m%d')}_ELA{ela}m.png"
                     self.visualize_spatial_albedo(
                         glacier_name, 
                         albedo_prediction, 
                         date,
                         save_path=save_path
                     )
-                    
-                    # Print summary statistics
-                    valid_albedo = albedo_prediction[~np.isnan(albedo_prediction)]
-                    if len(valid_albedo) > 0:
-                        print(f"\\n{glacier_name} - {date_str} Summary:")
-                        print(f"  Valid pixels: {len(valid_albedo)}")
-                        print(f"  Mean albedo: {np.mean(valid_albedo):.3f}")
-                        print(f"  Std albedo: {np.std(valid_albedo):.3f}")
-                        print(f"  Min-Max: {np.min(valid_albedo):.3f} - {np.max(valid_albedo):.3f}")
                 else:
                     print(f"Failed to predict albedo for {glacier_name} on {date_str}")
         
         return results
 
-# Main workflow function
+# Main workflow function with configurable ELAs
 def main():
-    """Main workflow for spatial albedo modeling"""
+    """Main workflow for spatial albedo modeling with glacier-specific ELAs"""
     
     # Define file paths
     dem_paths = {
-        'Hansbreen': r"D:\\PhD\\1st_year\\1st_article\\DEM\\Hansbreen_DEM.tif",
-        'Werenskioldbreen': r"D:\\PhD\\1st_year\\1st_article\\DEM\\Werenskioldbreen_DEM.tif"
+        'Hansbreen': r"D:\PhD\1st_year\1st_article\DEM\Hansbreen_DEM.tif",
+        'Werenskioldbreen': r"D:\PhD\1st_year\1st_article\DEM\Werenskioldbreen_DEM.tif"
     }
     
     aws_data_paths = {
-        'hans4': r"D:\\PhD\\2nd_year\\1st_article\\Model_DEM\\Stations_processed_data\\hans4_2011_cleaned.csv",
-        'hans9': r"D:\\PhD\\2nd_year\\1st_article\\Model_DEM\\Stations_processed_data\\hans9_2011_cleaned.csv",
-        'werenskiold': r"D:\\PhD\\2nd_year\\1st_article\\Model_DEM\\Stations_processed_data\\werenskiold_2011_cleaned.csv"
+        'hans4': r"D:\PhD\2nd_year\1st_article\Model_DEM\Stations_processed_data\hans4_2011_cleaned.csv",
+        'hans9': r"D:\PhD\2nd_year\1st_article\Model_DEM\Stations_processed_data\hans9_2011_cleaned.csv",
+        'werenskiold': r"D:\PhD\2nd_year\1st_article\Model_DEM\Stations_processed_data\werenskiold_2011_cleaned.csv"
     }
     
     station_elevations = {
@@ -447,8 +521,19 @@ def main():
         'werenskiold': 360
     }
     
-    # Initialize model
-    spatial_model = SpatialAlbedoModel(dem_paths, aws_data_paths, station_elevations)
+    # Define glacier-specific ELAs
+    glacier_elas = {
+        'Hansbreen': 410,
+        'Werenskioldbreen': 480
+    }
+    
+    # Initialize model with ELA settings
+    spatial_model = SpatialAlbedoModel(
+        dem_paths, 
+        aws_data_paths, 
+        station_elevations, 
+        glacier_elas=glacier_elas
+    )
     
     # Load data
     print("Loading DEM and AWS data...")
@@ -456,16 +541,16 @@ def main():
     spatial_model.load_aws_data()
     
     # Calculate topographic variables
-    print("\\nCalculating topographic variables...")
+    print("\nCalculating topographic variables...")
     for glacier_name in dem_paths.keys():
         spatial_model.calculate_topographic_variables(glacier_name)
     
     # Train models
-    print("\\nTraining models...")
+    print("\nTraining models...")
     spatial_model.train_models_from_data()
     
     # Create predictions for validation dates
-    print("\\nCreating validation predictions...")
+    print("\nCreating validation predictions...")
     validation_results = spatial_model.create_validation_predictions()
     
     return spatial_model, validation_results

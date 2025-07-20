@@ -1,0 +1,459 @@
+# Google Earth Engine Setup and Authentication
+import ee
+import geemap
+
+# Step 1: Authenticate (run this ONCE on your machine)
+print("First time setup - authenticate with Google Earth Engine")
+print("This will open a browser window for authentication")
+ee.Authenticate()
+
+# Step 2: Initialize Earth Engine
+print("Initializing Earth Engine...")
+ee.Initialize()
+
+# Step 3: Test if everything works
+print("Testing Earth Engine connection...")
+try:
+    # Simple test - get info about a small image collection
+    test_collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2').limit(1)
+    count = test_collection.size()
+    print(f"✓ Earth Engine is working! Test collection size: {count.getInfo()}")
+    print("You're ready to proceed!")
+except Exception as e:
+    print(f"✗ Error: {e}")
+    print("Please check your authentication and try again")
+
+# Optional: Display available Landsat collections
+print("\nAvailable Landsat Collections:")
+collections = [
+    'LANDSAT/LC08/C02/T1_L2',  # Landsat 8 Surface Reflectance
+    'LANDSAT/LE07/C02/T1_L2',  # Landsat 7 Surface Reflectance  
+    'LANDSAT/LT05/C02/T1_L2'   # Landsat 5 Surface Reflectance
+]
+
+for collection in collections:
+    try:
+        col = ee.ImageCollection(collection)
+        print(f"✓ {collection}")
+    except:
+        print(f"✗ {collection} - not accessible")
+
+
+## run in the next cell
+
+import ee
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+from shapely.geometry import mapping
+
+# Initialize Earth Engine
+ee.Initialize(project='ee-dcyran94')
+
+print("ALBEDO ANALYSIS WITH ACTUAL GLACIER BOUNDARIES")
+print("="*55)
+print("Using shapefiles instead of circular approximations")
+
+# Method 1: Load glacier boundaries from your PC shapefiles
+def load_glacier_boundaries_from_files():
+    """Load glacier boundaries from your PC shapefiles"""
+    try:
+        # Your exact file paths
+        hansbreen_path = r"D:\PhD\1st_year\1st_article\Glacier_shapefile\Hansbreen_shapefile.shp"
+        werenskiold_path = r"D:\PhD\1st_year\1st_article\Glacier_shapefile\Werenskioldbreen_shapefile.shp"
+        
+        print(f"Loading Hansbreen from: {hansbreen_path}")
+        print(f"Loading Werenskioldbreen from: {werenskiold_path}")
+        
+        # Read shapefiles
+        hansbreen_gdf = gpd.read_file(hansbreen_path)
+        werenskiold_gdf = gpd.read_file(werenskiold_path)
+        
+        print(f"Hansbreen shapefile loaded: {len(hansbreen_gdf)} features")
+        print(f"Werenskioldbreen shapefile loaded: {len(werenskiold_gdf)} features")
+        
+        # Ensure proper CRS (should be geographic coordinates for Earth Engine)
+        if hansbreen_gdf.crs != 'EPSG:4326':
+            print(f"Reprojecting Hansbreen from {hansbreen_gdf.crs} to EPSG:4326")
+            hansbreen_gdf = hansbreen_gdf.to_crs('EPSG:4326')
+        
+        if werenskiold_gdf.crs != 'EPSG:4326':
+            print(f"Reprojecting Werenskioldbreen from {werenskiold_gdf.crs} to EPSG:4326")
+            werenskiold_gdf = werenskiold_gdf.to_crs('EPSG:4326')
+        
+        # Get the first (and likely only) geometry from each shapefile
+        hansbreen_geom = hansbreen_gdf.geometry.iloc[0]
+        werenskiold_geom = werenskiold_gdf.geometry.iloc[0]
+        
+        # Convert to Earth Engine geometries
+        hansbreen_ee = ee.Geometry(mapping(hansbreen_geom))
+        werenskiold_ee = ee.Geometry(mapping(werenskiold_geom))
+        
+        print("✓ Glacier boundaries loaded successfully from your PC shapefiles")
+        
+        # Print some info about the loaded geometries
+        print(f"Hansbreen geometry type: {hansbreen_geom.geom_type}")
+        print(f"Werenskioldbreen geometry type: {werenskiold_geom.geom_type}")
+        
+        return hansbreen_ee, werenskiold_ee
+        
+    except FileNotFoundError as e:
+        print(f"Shapefile not found: {e}")
+        print("Please check that the file paths are correct and files exist")
+        return None, None
+    except Exception as e:
+        print(f"Error loading shapefiles: {e}")
+        print("This might be due to:")
+        print("- Missing .dbf files (try creating empty ones)")
+        print("- Coordinate reference system issues")
+        print("- Corrupted shapefile components")
+        return None, None
+
+# Method 2: Load glacier boundaries from online RGI database
+def load_glacier_boundaries_from_rgi():
+    """Load glacier boundaries from Randolph Glacier Inventory"""
+    try:
+        # Check if RGI data is available in Earth Engine
+        # Common RGI dataset names in Earth Engine
+        possible_rgi_datasets = [
+            "RGI/RGI6",  # RGI Version 6
+            "GLIMS/current",  # GLIMS current dataset
+            "glacier_atlas_rgi"  # Alternative name
+        ]
+        
+        study_area = ee.Geometry.Rectangle([15.0, 77.0, 16.0, 77.2])
+        
+        for dataset_name in possible_rgi_datasets:
+            try:
+                rgi_collection = ee.FeatureCollection(dataset_name)
+                
+                # Filter for Svalbard region and our study area
+                svalbard_glaciers = rgi_collection.filterBounds(study_area)
+                
+                # Search for glaciers by name or proximity to known coordinates
+                hansbreen_point = ee.Geometry.Point([15.627, 77.082])
+                werenskiold_point = ee.Geometry.Point([15.338, 77.083])
+                
+                # Find closest glaciers (within 2km)
+                hansbreen_glacier = svalbard_glaciers.filterBounds(hansbreen_point.buffer(2000)).first()
+                werenskiold_glacier = svalbard_glaciers.filterBounds(werenskiold_point.buffer(2000)).first()
+                
+                if hansbreen_glacier.getInfo() and werenskiold_glacier.getInfo():
+                    hansbreen_ee = hansbreen_glacier.geometry()
+                    werenskiold_ee = werenskiold_glacier.geometry()
+                    print(f"✓ Glacier boundaries loaded from {dataset_name}")
+                    return hansbreen_ee, werenskiold_ee
+                    
+            except:
+                continue
+        
+        print("RGI datasets not available in Earth Engine")
+        print("Download RGI 7.0 Svalbard data from: https://nsidc.org/data/nsidc-0770/versions/7")
+        return None, None
+        
+    except Exception as e:
+        print(f"Error loading RGI data: {e}")
+        return None, None
+
+# Method 3: Create more accurate boundaries using coordinates
+def create_improved_glacier_boundaries():
+    """Create more accurate glacier boundaries using known coordinates"""
+    
+    # Hansbreen glacier - more detailed boundary points
+    hansbreen_coords = [
+        [15.60, 77.075], [15.62, 77.075], [15.64, 77.077], [15.65, 77.080],
+        [15.64, 77.085], [15.62, 77.088], [15.60, 77.090], [15.58, 77.088],
+        [15.57, 77.085], [15.58, 77.080], [15.59, 77.077], [15.60, 77.075]
+    ]
+    
+    # Werenskioldbreen glacier - more detailed boundary points  
+    werenskiold_coords = [
+        [15.32, 77.075], [15.34, 77.076], [15.36, 77.078], [15.37, 77.082],
+        [15.36, 77.086], [15.34, 77.088], [15.32, 77.089], [15.30, 77.087],
+        [15.29, 77.084], [15.30, 77.080], [15.31, 77.077], [15.32, 77.075]
+    ]
+    
+    hansbreen_ee = ee.Geometry.Polygon([hansbreen_coords])
+    werenskiold_ee = ee.Geometry.Polygon([werenskiold_coords])
+    
+    print("✓ Using improved polygon boundaries (manual coordinates)")
+    return hansbreen_ee, werenskiold_ee
+
+# Try to load glacier boundaries (priority order)
+print("Attempting to load glacier boundaries from your PC...")
+
+# First, try to load from your PC shapefiles
+hansbreen_ee, werenskiold_ee = load_glacier_boundaries_from_files()
+
+# If shapefiles fail, try RGI
+if hansbreen_ee is None:
+    print("PC shapefiles failed to load, trying RGI database...")
+    hansbreen_ee, werenskiold_ee = load_glacier_boundaries_from_rgi()
+
+# If both fail, use improved manual boundaries
+if hansbreen_ee is None:
+    print("PC shapefiles and RGI failed, using improved manual polygon boundaries...")
+    hansbreen_ee, werenskiold_ee = create_improved_glacier_boundaries()
+
+# Get SPECIFIC images for target dates
+study_area = ee.Geometry.Rectangle([15.0, 77.0, 16.0, 77.2])
+target_dates = ['2011-07-26', '2011-08-20']
+
+collection = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2') \
+    .filterBounds(study_area) \
+    .filter(ee.Filter.inList('DATE_ACQUIRED', target_dates))
+
+# Get image information
+all_images = collection.getInfo()
+print(f"\nAnalyzing {len(all_images['features'])} specific images:")
+
+image_info = []
+for i, img in enumerate(all_images['features']):
+    props = img['properties']
+    date = props['DATE_ACQUIRED']
+    cloud_cover = props.get('CLOUD_COVER', 'N/A')
+    image_info.append({'date': date, 'cloud_cover': cloud_cover, 'index': i})
+    print(f"{i+1}. {date} - {cloud_cover}% clouds")
+
+# Calculate actual glacier areas
+def get_glacier_area(geometry):
+    """Calculate glacier area in km²"""
+    area_m2 = geometry.area().getInfo()
+    area_km2 = area_m2 / 1e6
+    return area_km2
+
+hansbreen_area = get_glacier_area(hansbreen_ee)
+werenskiold_area = get_glacier_area(werenskiold_ee)
+
+print(f"\nGlacier Areas:")
+print(f"Hansbreen: {hansbreen_area:.2f} km²")
+print(f"Werenskioldbreen: {werenskiold_area:.2f} km²")
+
+print("\nStep 1: Define multiple albedo algorithms")
+print("-" * 42)
+
+def calculate_multiple_albedos(image):
+    """Calculate albedo using multiple algorithms"""
+    
+    # Apply scaling factors
+    def apply_scale_factors(img):
+        optical_bands = img.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7']).multiply(0.0000275).add(-0.2)
+        return img.addBands(optical_bands, None, True)
+    
+    scaled_image = apply_scale_factors(image)
+    
+    # Get bands
+    blue = scaled_image.select('SR_B1')
+    green = scaled_image.select('SR_B2')
+    red = scaled_image.select('SR_B3')
+    nir = scaled_image.select('SR_B4')
+    swir1 = scaled_image.select('SR_B5')
+    swir2 = scaled_image.select('SR_B7')
+    
+    # Algorithm 1: Liang (2001)
+    albedo_liang = blue.multiply(0.356).add(
+                   green.multiply(0.130)).add(
+                   red.multiply(0.373)).add(
+                   nir.multiply(0.085)).add(
+                   swir1.multiply(0.072)).add(
+                   swir2.multiply(-0.0018))
+    
+    # Algorithm 2: Tasumi et al. (2008)
+    albedo_tasumi = blue.multiply(0.254).add(
+                    green.multiply(0.149)).add(
+                    red.multiply(0.147)).add(
+                    nir.multiply(0.311)).add(
+                    swir1.multiply(0.103)).add(
+                    swir2.multiply(0.036))
+    
+    # Algorithm 3: Silva et al. (2016)
+    albedo_silva = blue.multiply(0.300).add(
+                   green.multiply(0.277)).add(
+                   red.multiply(0.233)).add(
+                   nir.multiply(0.143)).add(
+                   swir1.multiply(0.036)).add(
+                   swir2.multiply(0.012))
+    
+    # Algorithm 4: Simple visible-NIR
+    albedo_simple = blue.add(green).add(red).add(nir).divide(4)
+    
+    # Algorithm 5: Knap et al. (1999)
+    albedo_knap = blue.multiply(0.726).add(
+                  red.multiply(0.322)).add(
+                  nir.multiply(-0.015)).add(
+                  swir1.multiply(0.581)).add(
+                  swir2.multiply(0.375))
+    
+    # Clamp all to valid range [0,1]
+    albedo_liang = albedo_liang.clamp(0, 1).rename('albedo_liang')
+    albedo_tasumi = albedo_tasumi.clamp(0, 1).rename('albedo_tasumi')
+    albedo_silva = albedo_silva.clamp(0, 1).rename('albedo_silva')
+    albedo_simple = albedo_simple.clamp(0, 1).rename('albedo_simple')
+    albedo_knap = albedo_knap.clamp(0, 1).rename('albedo_knap')
+    
+    return scaled_image.addBands([albedo_liang, albedo_tasumi, albedo_silva, albedo_simple, albedo_knap])
+
+def mask_clouds_and_shadows(image):
+    """Enhanced cloud masking"""
+    qa = image.select('QA_PIXEL')
+    
+    cloud_bit = 3
+    shadow_bit = 4
+    cirrus_bit = 2
+    
+    cloud_mask = qa.bitwiseAnd(1 << cloud_bit).eq(0)
+    shadow_mask = qa.bitwiseAnd(1 << shadow_bit).eq(0)
+    cirrus_mask = qa.bitwiseAnd(1 << cirrus_bit).eq(0)
+    
+    clear_mask = cloud_mask.And(shadow_mask).And(cirrus_mask)
+    
+    return image.updateMask(clear_mask)
+
+def get_glacier_stats_multi_algorithm(image, glacier_geometry, date, cloud_cover, glacier_name):
+    """Calculate stats for all algorithms with enhanced metrics"""
+    
+    # Process image
+    masked_image = mask_clouds_and_shadows(image)
+    albedo_image = calculate_multiple_albedos(masked_image)
+    
+    # Clip to glacier
+    glacier_image = albedo_image.clip(glacier_geometry)
+    
+    algorithms = ['albedo_liang', 'albedo_tasumi', 'albedo_silva', 'albedo_simple', 'albedo_knap']
+    
+    results = {
+        'glacier': glacier_name,
+        'date': date, 
+        'cloud_cover': cloud_cover,
+        'glacier_area_km2': get_glacier_area(glacier_geometry)
+    }
+    
+    for alg in algorithms:
+        stats = glacier_image.select(alg).reduceRegion(
+            reducer=ee.Reducer.mean().combine(
+                ee.Reducer.stdDev(), sharedInputs=True
+            ).combine(
+                ee.Reducer.count(), sharedInputs=True
+            ).combine(
+                ee.Reducer.median(), sharedInputs=True
+            ).combine(
+                ee.Reducer.percentile([25, 75]), sharedInputs=True
+            ),
+            geometry=glacier_geometry,
+            scale=30,
+            maxPixels=1e9
+        ).getInfo()
+        
+        results[f'{alg}_mean'] = stats.get(f'{alg}_mean')
+        results[f'{alg}_std'] = stats.get(f'{alg}_stdDev')
+        results[f'{alg}_count'] = stats.get(f'{alg}_count')
+        results[f'{alg}_median'] = stats.get(f'{alg}_median')
+        results[f'{alg}_q25'] = stats.get(f'{alg}_p25')
+        results[f'{alg}_q75'] = stats.get(f'{alg}_p75')
+    
+    return results
+
+print("Algorithms defined:")
+print("1. Liang (2001) - Standard broadband albedo")
+print("2. Tasumi et al. (2008) - Updated coefficients") 
+print("3. Silva et al. (2016) - Glacier-adapted")
+print("4. Simple visible-NIR average")
+print("5. Knap et al. (1999) - Snow/ice specific")
+
+print("\nStep 2: Processing images with actual glacier boundaries")
+print("-" * 55)
+
+all_results = []
+
+for info in image_info:
+    try:
+        image = collection.filter(ee.Filter.eq('DATE_ACQUIRED', info['date'])).first()
+        
+        print(f"Processing {info['date']} ({info['cloud_cover']}% clouds)...")
+        
+        # Calculate for both glaciers with actual boundaries
+        hansbreen_stats = get_glacier_stats_multi_algorithm(
+            image, hansbreen_ee, info['date'], info['cloud_cover'], 'Hansbreen'
+        )
+        werenskiold_stats = get_glacier_stats_multi_algorithm(
+            image, werenskiold_ee, info['date'], info['cloud_cover'], 'Werenskioldbreen'
+        )
+        
+        all_results.extend([hansbreen_stats, werenskiold_stats])
+        
+    except Exception as e:
+        print(f"Error processing {info['date']}: {e}")
+
+print("✓ Processing complete with actual glacier boundaries")
+
+print("\nStep 3: Enhanced Results Analysis")
+print("-" * 35)
+
+# Convert to DataFrame
+results_df = pd.DataFrame(all_results)
+
+algorithms = ['liang', 'tasumi', 'silva', 'simple', 'knap']
+
+for glacier in ['Hansbreen', 'Werenskioldbreen']:
+    glacier_data = results_df[results_df['glacier'] == glacier]
+    
+    print(f"\n{glacier.upper()} GLACIER - ACTUAL BOUNDARY ANALYSIS")
+    print("="*55)
+    print(f"Glacier Area: {glacier_data.iloc[0]['glacier_area_km2']:.2f} km²")
+    
+    for _, row in glacier_data.iterrows():
+        if any(row[f'albedo_{alg}_mean'] is not None for alg in algorithms):
+            print(f"\n{row['date']} (Cloud: {row['cloud_cover']}%)")
+            print("-" * 45)
+            for alg in algorithms:
+                mean_val = row[f'albedo_{alg}_mean']
+                std_val = row[f'albedo_{alg}_std']
+                median_val = row[f'albedo_{alg}_median']
+                count_val = row[f'albedo_{alg}_count']
+                if mean_val is not None:
+                    print(f"  {alg.capitalize():8}: {mean_val:.3f} ± {std_val:.3f} "
+                          f"(median: {median_val:.3f}, n={count_val})")
+
+# Calculate coverage statistics
+print(f"\n{'='*60}")
+print("BOUNDARY COMPARISON SUMMARY")
+print("="*60)
+
+print("\nPixel Coverage Comparison:")
+for glacier in ['Hansbreen', 'Werenskioldbreen']:
+    glacier_data = results_df[results_df['glacier'] == glacier]
+    area = glacier_data.iloc[0]['glacier_area_km2']
+    avg_pixels = glacier_data['albedo_liang_count'].mean()
+    pixel_area_km2 = (avg_pixels * 30 * 30) / 1e6  # 30m pixel size
+    coverage_percent = (pixel_area_km2 / area) * 100
+    
+    print(f"{glacier}: {area:.2f} km² glacier area")
+    print(f"  Average {avg_pixels:.0f} pixels analyzed")
+    print(f"  {pixel_area_km2:.2f} km² pixel coverage ({coverage_percent:.1f}%)")
+
+print("\nTroubleshooting guide if shapefiles fail to load:")
+print("="*55)
+print("COMMON ISSUES & SOLUTIONS:")
+print()
+print("1. Missing .dbf files:")
+print("   - Shapefiles typically need .shp, .shx, .dbf, .prj files")
+print("   - If .dbf missing, create empty one or use QGIS to export complete set")
+print()
+print("2. File path issues:")
+print("   - Ensure Python can access D:\\ drive")
+print("   - Try copying shapefiles to same folder as Python script")
+print("   - Use forward slashes: D:/PhD/1st_year/... instead of backslashes")
+print()
+print("3. Coordinate system issues:")
+print("   - Code will automatically reproject to EPSG:4326 (WGS84)")
+print("   - Ensure .prj file exists and is readable")
+print()
+print("4. Alternative approaches:")
+print("   - Upload shapefiles to Google Drive and use Earth Engine asset")
+print("   - Convert to GeoJSON format using QGIS")
+print("   - Use the improved polygon boundaries as backup")
+print()
+print("SUCCESS INDICATORS:")
+print("- If loaded successfully, you'll see actual glacier areas calculated")
+print("- Pixel counts should match real glacier extents")
+print("- Results will be more accurate than circular approximations")

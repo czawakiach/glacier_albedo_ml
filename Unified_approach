@@ -1,0 +1,1493 @@
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+import os
+
+def load_and_analyze_albedo(filepath, glacier_name, date):
+    """
+    Load albedo data from .tif file and calculate statistics
+    
+    Parameters:
+    filepath (str): Path to the .tif file
+    glacier_name (str): Name of the glacier
+    date (str): Date of the measurement
+    
+    Returns:
+    tuple: (albedo_data, mean_albedo, valid_pixel_count)
+    """
+    try:
+        with rasterio.open(filepath) as src:
+            # Read the albedo data
+            albedo_data = src.read(1)  # Read first band
+            
+            # Get NoData value
+            nodata_value = src.nodata
+            
+            # Create mask for valid data
+            if nodata_value is not None:
+                valid_mask = albedo_data != nodata_value
+            else:
+                # If no explicit NoData value, exclude NaN and values outside 0-1 range
+                valid_mask = (~np.isnan(albedo_data)) & (albedo_data >= 0) & (albedo_data <= 1)
+            
+            # Calculate mean albedo for valid pixels only
+            valid_albedo = albedo_data[valid_mask]
+            
+            if len(valid_albedo) > 0:
+                mean_albedo = np.mean(valid_albedo)
+                valid_pixel_count = len(valid_albedo)
+            else:
+                mean_albedo = np.nan
+                valid_pixel_count = 0
+                
+            return albedo_data, mean_albedo, valid_pixel_count, valid_mask
+            
+    except Exception as e:
+        print(f"Error loading {filepath}: {str(e)}")
+        return None, None, None, None
+
+def visualize_albedo(albedo_data, valid_mask, glacier_name, date, mean_albedo):
+    """
+    Create visualization of albedo data
+    
+    Parameters:
+    albedo_data (numpy.ndarray): Albedo data array
+    valid_mask (numpy.ndarray): Boolean mask for valid pixels
+    glacier_name (str): Name of the glacier
+    date (str): Date of the measurement
+    mean_albedo (float): Mean albedo value
+    """
+    # Create a custom colormap for albedo (dark blue to white)
+    colors = ['#08306b', '#2171b5', '#6baed6', '#c6dbef', '#ffffff']
+    n_bins = 100
+    cmap = LinearSegmentedColormap.from_list('albedo', colors, N=n_bins)
+    
+    # Create figure
+    plt.figure(figsize=(12, 8))
+    
+    # Create masked array to properly handle NoData values in visualization
+    masked_albedo = np.ma.masked_where(~valid_mask, albedo_data)
+    
+    # Plot albedo
+    im = plt.imshow(masked_albedo, cmap=cmap, vmin=0, vmax=1)
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, shrink=0.8)
+    cbar.set_label('Albedo', rotation=270, labelpad=20, fontsize=12)
+    
+    # Set title and labels
+    plt.title(f'{glacier_name} - Albedo Distribution\nDate: {date} | Mean Albedo: {mean_albedo:.3f}', 
+              fontsize=14, fontweight='bold')
+    plt.xlabel('Pixel X', fontsize=12)
+    plt.ylabel('Pixel Y', fontsize=12)
+    
+    # Remove ticks for cleaner look
+    plt.xticks([])
+    plt.yticks([])
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    # Show plot
+    plt.show()
+
+def main():
+    """
+    Main function to process all glacier albedo files
+    """
+    # Define file paths and metadata
+    files_data = [
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72110052011207ASN00_2011-07-26\Calculated\Werenskiold_02_albedo_26_07_2011.tif",
+            'glacier': 'Werenskioldbreen',
+            'date': '26.07.2011'
+        },
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72100052011232ASN00_2011-08-20\Calculated\Werenskiold_02_albedo_20_08_2011.tif",
+            'glacier': 'Werenskioldbreen',
+            'date': '20.08.2011'
+        },
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72110052011207ASN00_2011-07-26\Calculated\Hans_02_albedo_26_07_2011.tif",
+            'glacier': 'Hansbreen',
+            'date': '26.07.2011'
+        },
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72100052011232ASN00_2011-08-20\Calculated\Hans_02_albedo_20_08_2011.tif",
+            'glacier': 'Hansbreen',  
+            'date': '20.08.2011'
+        }
+    ]
+    
+    print("=== Svalbard Glacier Albedo Analysis ===\n")
+    
+    # Process each file
+    results = []
+    
+    for file_info in files_data:
+        filepath = file_info['filepath']
+        glacier_name = file_info['glacier']
+        date = file_info['date']
+        
+        print(f"Processing: {glacier_name} - {date}")
+        print(f"File: {os.path.basename(filepath)}")
+        
+        # Check if file exists
+        if not os.path.exists(filepath):
+            print(f"⚠️  File not found: {filepath}")
+            print("-" * 60)
+            continue
+        
+        # Load and analyze data
+        albedo_data, mean_albedo, valid_pixel_count, valid_mask = load_and_analyze_albedo(
+            filepath, glacier_name, date
+        )
+        
+        if albedo_data is not None:
+            # Print statistics
+            print(f"✅ Successfully loaded albedo data")
+            print(f"   Mean Albedo: {mean_albedo:.4f}")
+            print(f"   Valid pixels: {valid_pixel_count:,}")
+            print(f"   Total pixels: {albedo_data.size:,}")
+            print(f"   Data coverage: {(valid_pixel_count/albedo_data.size)*100:.1f}%")
+            
+            # Store results
+            results.append({
+                'glacier': glacier_name,
+                'date': date,
+                'mean_albedo': mean_albedo,
+                'valid_pixels': valid_pixel_count
+            })
+            
+            # Create visualization
+            visualize_albedo(albedo_data, valid_mask, glacier_name, date, mean_albedo)
+            
+        else:
+            print("❌ Failed to load data")
+        
+        print("-" * 60)
+    
+    # Summary table
+    if results:
+        print("\n=== SUMMARY TABLE ===")
+        print(f"{'Glacier':<20} {'Date':<12} {'Mean Albedo':<12} {'Valid Pixels':<12}")
+        print("=" * 60)
+        
+        for result in results:
+            print(f"{result['glacier']:<20} {result['date']:<12} {result['mean_albedo']:<12.4f} {result['valid_pixels']:<12,}")
+        
+        # Calculate temporal changes
+        print("\n=== TEMPORAL CHANGES ===")
+        werenskiold_data = [r for r in results if r['glacier'] == 'Werenskioldbreen']
+        hansbreen_data = [r for r in results if r['glacier'] == 'Hansbreen']
+        
+        if len(werenskiold_data) == 2:
+            july_w = next((r for r in werenskiold_data if '26.07' in r['date']), None)
+            august_w = next((r for r in werenskiold_data if '20.08' in r['date']), None)
+            if july_w and august_w:
+                change_w = august_w['mean_albedo'] - july_w['mean_albedo']
+                print(f"Werenskioldbreen: {change_w:+.4f} (July to August)")
+        
+        if len(hansbreen_data) == 2:
+            july_h = next((r for r in hansbreen_data if '26.07' in r['date']), None)
+            august_h = next((r for r in hansbreen_data if '20.08' in r['date']), None)
+            if july_h and august_h:
+                change_h = august_h['mean_albedo'] - july_h['mean_albedo']
+                print(f"Hansbreen: {change_h:+.4f} (July to August)")
+
+if __name__ == "__main__":
+    main()
+
+import numpy as np
+import pandas as pd
+import rasterio
+from rasterio.transform import from_bounds
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+import warnings
+warnings.filterwarnings('ignore')
+
+class SpatialAlbedoModel:
+    """
+    Class for spatial albedo modeling across glacier surfaces using DEM and AWS data
+    with configurable ELA (Equilibrium Line Altitude) for each glacier
+    """
+    
+    def __init__(self, dem_paths, aws_data_paths, station_elevations, glacier_elas=None):
+        self.dem_paths = dem_paths
+        self.aws_data_paths = aws_data_paths
+        self.station_elevations = station_elevations
+        
+        # Set default ELA values or use user-provided ones
+        if glacier_elas is None:
+            self.glacier_elas = {
+                'Hansbreen': 900,
+                'Werenskioldbreen': 900
+            }
+        else:
+            self.glacier_elas = glacier_elas
+            
+        # Print ELA settings
+        print("ELA settings for glaciers:")
+        for glacier_name, ela in self.glacier_elas.items():
+            print(f"  {glacier_name}: {ela} m")
+        
+        self.dems = {}
+        self.aws_data = {}
+        self.models = {}
+        self.scalers = {}
+        
+    def get_ela_for_glacier(self, glacier_name):
+        """Get ELA for a specific glacier, with fallback to default"""
+        return self.glacier_elas.get(glacier_name, 400)  # Default fallback
+        
+    def load_dems(self):
+        """Load DEM data for each glacier"""
+        for glacier_name, dem_path in self.dem_paths.items():
+            try:
+                with rasterio.open(dem_path) as src:
+                    elevation = src.read(1)
+                    transform = src.transform
+                    crs = src.crs
+                    
+                    # Handle NoData values (typically -9999)
+                    elevation = elevation.astype(float)
+                    elevation[elevation <= -9999] = np.nan
+                    
+                    # Create coordinate arrays
+                    height, width = elevation.shape
+                    cols, rows = np.meshgrid(np.arange(width), np.arange(height))
+                    xs, ys = rasterio.transform.xy(transform, rows, cols)
+                    
+                    self.dems[glacier_name] = {
+                        'elevation': elevation,
+                        'transform': transform,
+                        'crs': crs,
+                        'x_coords': np.array(xs),
+                        'y_coords': np.array(ys),
+                        'shape': elevation.shape
+                    }
+                    
+                print(f"Loaded DEM for {glacier_name}: {elevation.shape}")
+                valid_elevation = elevation[~np.isnan(elevation)]
+                if len(valid_elevation) > 0:
+                    print(f"Valid elevation range: {np.min(valid_elevation):.1f} - {np.max(valid_elevation):.1f} m")
+                    print(f"Valid pixels: {len(valid_elevation)} / {elevation.size}")
+                    
+                    # Check ELA coverage
+                    ela = self.get_ela_for_glacier(glacier_name)
+                    below_ela = np.sum(valid_elevation <= ela)
+                    above_ela = np.sum(valid_elevation > ela)
+                    print(f"Pixels below ELA ({ela}m): {below_ela} | above ELA: {above_ela}")
+                
+            except Exception as e:
+                print(f"Error loading DEM for {glacier_name}: {e}")
+    
+    def load_aws_data(self):
+        """Load AWS station data"""
+        for station_name, data_path in self.aws_data_paths.items():
+            try:
+                df = pd.read_csv(data_path)
+                df['date'] = pd.to_datetime(df['date'])
+                
+                # Remove rows with missing albedo values
+                initial_len = len(df)
+                df = df.dropna(subset=['albedo'])
+                final_len = len(df)
+                
+                self.aws_data[station_name] = df
+                print(f"Loaded AWS data for {station_name}: {final_len} records (removed {initial_len-final_len} with missing albedo)")
+                print(f"Date range: {df['date'].min()} to {df['date'].max()}")
+                
+            except Exception as e:
+                print(f"Error loading AWS data for {station_name}: {e}")
+    
+    def calculate_topographic_variables(self, glacier_name):
+        """Calculate slope, aspect, and other topographic variables from DEM"""
+        dem_data = self.dems[glacier_name]
+        elevation = dem_data['elevation']
+        
+        # Calculate gradients (slope and aspect)
+        dy, dx = np.gradient(elevation)
+        slope = np.arctan(np.sqrt(dx**2 + dy**2)) * 180 / np.pi
+        aspect = np.arctan2(-dx, dy) * 180 / np.pi
+        aspect[aspect < 0] += 360
+        
+        # Store topographic variables
+        self.dems[glacier_name]['slope'] = slope
+        self.dems[glacier_name]['aspect'] = aspect
+        
+        print(f"Calculated topographic variables for {glacier_name}")
+        
+        return slope, aspect
+    
+    def train_models_from_data(self):
+        """Train linear regression and MLP models using existing AWS data with glacier-specific ELAs"""
+        # Combine all AWS data for training
+        all_data = []
+        for station_name, df in self.aws_data.items():
+            station_df = df.copy()
+            station_df['elevation'] = self.station_elevations[station_name]
+            
+            # Determine which glacier this station belongs to (based on name pattern)
+            if 'hans' in station_name.lower():
+                station_df['glacier'] = 'Hansbreen'
+            elif 'werenskiold' in station_name.lower():
+                station_df['glacier'] = 'Werenskioldbreen'
+            else:
+                # Default assignment if unclear
+                station_df['glacier'] = 'Unknown'
+            
+            all_data.append(station_df)
+        
+        combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Additional check for NaN values (should be clean now)
+        combined_df = combined_df.dropna(subset=['albedo'])
+        print(f"Training data after cleaning: {len(combined_df)} records")
+        
+        # Prepare data using glacier-specific ELAs
+        ablation_data = []
+        accumulation_data = []
+        
+        for glacier_name in self.glacier_elas.keys():
+            glacier_mask = combined_df['glacier'] == glacier_name
+            glacier_data = combined_df[glacier_mask]
+            
+            if len(glacier_data) > 0:
+                ela = self.get_ela_for_glacier(glacier_name)
+                
+                # Split data based on glacier-specific ELA
+                ablation_mask = glacier_data['elevation'] <= ela
+                accumulation_mask = glacier_data['elevation'] > ela
+                
+                ablation_subset = glacier_data[ablation_mask]
+                accumulation_subset = glacier_data[accumulation_mask]
+                
+                if len(ablation_subset) > 0:
+                    ablation_data.append(ablation_subset)
+                    print(f"{glacier_name}: {len(ablation_subset)} ablation zone samples (≤{ela}m)")
+                
+                if len(accumulation_subset) > 0:
+                    accumulation_data.append(accumulation_subset)
+                    print(f"{glacier_name}: {len(accumulation_subset)} accumulation zone samples (>{ela}m)")
+        
+        # Combine ablation data from all glaciers
+        if ablation_data:
+            combined_ablation = pd.concat(ablation_data, ignore_index=True)
+            
+            feature_cols = ['day_of_year', 'TC', 'pdd', 'snowfall_probability']
+            X_ablation = combined_ablation[feature_cols]
+            y_ablation = combined_ablation['albedo']
+            
+            # Handle missing values in features only
+            imputer = SimpleImputer(strategy='mean')
+            X_ablation_clean = imputer.fit_transform(X_ablation)
+            
+            # Train linear regression
+            self.models['linear'] = LinearRegression()
+            self.models['linear'].fit(X_ablation_clean, y_ablation)
+            self.scalers['linear_imputer'] = imputer
+            
+            print(f"Trained linear regression model for ablation zones with {len(combined_ablation)} samples")
+            print(f"Linear model R² score: {self.models['linear'].score(X_ablation_clean, y_ablation):.3f}")
+        
+        # Combine accumulation data from all glaciers
+        if accumulation_data:
+            combined_accumulation = pd.concat(accumulation_data, ignore_index=True)
+            
+            feature_cols = ['TC', 'pdd', 'day_of_year', 'snowfall_probability']
+            X_accumulation = combined_accumulation[feature_cols]
+            y_accumulation = combined_accumulation['albedo']
+            
+            # Handle missing values and scaling
+            imputer = SimpleImputer(strategy='mean')
+            scaler = StandardScaler()
+            
+            X_accumulation_clean = imputer.fit_transform(X_accumulation)
+            X_accumulation_scaled = scaler.fit_transform(X_accumulation_clean)
+            
+            # Train MLP with smaller network for limited data
+            self.models['mlp'] = MLPRegressor(
+                hidden_layer_sizes=(50, 25),
+                activation='relu',
+                solver='adam',
+                alpha=0.001,
+                max_iter=2000,
+                early_stopping=True,
+                validation_fraction=0.2,
+                n_iter_no_change=20,
+                random_state=42
+            )
+            self.models['mlp'].fit(X_accumulation_scaled, y_accumulation)
+            self.scalers['mlp_imputer'] = imputer
+            self.scalers['mlp_scaler'] = scaler
+            
+            print(f"Trained MLP model for accumulation zones with {len(combined_accumulation)} samples")
+            
+        else:
+            print("Warning: No accumulation zone data available for MLP training")
+            print("Will use linear regression for all elevations")
+    
+    def interpolate_meteorological_variables(self, glacier_name, target_date, lapse_rate_temp=-0.0053):
+        """Interpolate meteorological variables from AWS stations to glacier grid - temperature gradient from Ignatiuk - 0.53"""
+        dem_data = self.dems[glacier_name]
+        elevation_grid = dem_data['elevation']
+        
+        # Station positions based on your map (approximate)
+        station_positions = {
+            'hans4': {'x_frac': 0.7, 'y_frac': 0.5},     # H4 position
+            'hans9': {'x_frac': 0.3, 'y_frac': 0.2},     # H9 position  
+            'werenskiold': {'x_frac': 0.4, 'y_frac': 0.6} # W position
+        }
+        
+        # Get station data for target date
+        station_coords = []
+        station_values = {}
+        
+        for station_name, station_elevation in self.station_elevations.items():
+            if station_name in self.aws_data and station_name in station_positions:
+                station_df = self.aws_data[station_name]
+                
+                # Find data for target date (with some tolerance)
+                station_df['date_only'] = station_df['date'].dt.date
+                target_date_only = target_date.date()
+                date_mask = station_df['date_only'] == target_date_only
+                
+                if date_mask.any():
+                    station_data = station_df[date_mask].iloc[0]
+                    
+                    # Position station based on fractional coordinates
+                    pos = station_positions[station_name]
+                    x_pos = int(pos['x_frac'] * elevation_grid.shape[1])
+                    y_pos = int(pos['y_frac'] * elevation_grid.shape[0])
+                    
+                    station_coords.append([x_pos, y_pos, station_elevation])
+                    
+                    for var in ['TC', 'pdd', 'snowfall_probability']:
+                        if var not in station_values:
+                            station_values[var] = []
+                        station_values[var].append(station_data[var])
+                else:
+                    print(f"No data for {station_name} on {target_date_only}")
+        
+        if not station_coords:
+            print(f"No station data available for {target_date}")
+            return None
+        
+        station_coords = np.array(station_coords)
+        print(f"Using {len(station_coords)} stations for interpolation")
+        
+        # Interpolate each variable
+        interpolated_vars = {}
+        
+        for var_name, values in station_values.items():
+            if var_name == 'TC':
+                # Apply temperature lapse rate
+                mean_elevation = np.nanmean(elevation_grid)
+                adjusted_temps = []
+                
+                for i, temp in enumerate(values):
+                    station_elev = station_coords[i, 2]
+                    # Adjust to reference elevation
+                    temp_adjusted = temp + lapse_rate_temp * (mean_elevation - station_elev)
+                    adjusted_temps.append(temp_adjusted)
+                
+                # Use mean adjusted temperature and apply lapse rate
+                mean_temp_ref = np.mean(adjusted_temps)
+                interpolated_vars[var_name] = mean_temp_ref + lapse_rate_temp * (elevation_grid - mean_elevation)
+                
+            else:
+                # For other variables, use elevation-based interpolation if multiple stations
+                if len(values) > 1:
+                    elevations = station_coords[:, 2]
+                    # Simple linear interpolation based on elevation
+                    elevation_flat = elevation_grid.flatten()
+                    valid_mask = ~np.isnan(elevation_flat)
+                    
+                    if np.any(valid_mask):
+                        interpolated_flat = np.full_like(elevation_flat, np.nan)
+                        interpolated_flat[valid_mask] = np.interp(
+                            elevation_flat[valid_mask], 
+                            elevations, 
+                            values
+                        )
+                        interpolated_vars[var_name] = interpolated_flat.reshape(elevation_grid.shape)
+                    else:
+                        interpolated_vars[var_name] = np.full_like(elevation_grid, np.mean(values))
+                else:
+                    # Use constant value if only one station
+                    interpolated_vars[var_name] = np.full_like(elevation_grid, values[0])
+        
+        return interpolated_vars
+    
+    def predict_spatial_albedo(self, glacier_name, target_date, day_of_year=None):
+        """Predict albedo across the glacier surface for a specific date using glacier-specific ELA"""
+        if day_of_year is None:
+            day_of_year = target_date.timetuple().tm_yday
+        
+        # Get glacier-specific ELA
+        ela = self.get_ela_for_glacier(glacier_name)
+        print(f"Using ELA = {ela}m for {glacier_name}")
+        
+        # Get interpolated meteorological variables
+        met_vars = self.interpolate_meteorological_variables(glacier_name, target_date)
+        if met_vars is None:
+            print("Cannot predict: no meteorological data available")
+            return None
+        
+        dem_data = self.dems[glacier_name]
+        elevation = dem_data['elevation']
+        
+        # Create feature arrays
+        shape = elevation.shape
+        features = {
+            'day_of_year': np.full(shape, day_of_year),
+            'TC': met_vars['TC'],
+            'pdd': met_vars['pdd'],
+            'snowfall_probability': met_vars['snowfall_probability']
+        }
+        
+        # Initialize albedo array
+        albedo_predicted = np.full(shape, np.nan)
+        
+        # Apply linear regression to ablation zone (below ELA)
+        ablation_mask = (elevation <= ela) & ~np.isnan(elevation)
+        if np.any(ablation_mask) and 'linear' in self.models:
+            ablation_features = np.column_stack([
+                features['day_of_year'][ablation_mask],
+                features['TC'][ablation_mask],
+                features['pdd'][ablation_mask],
+                features['snowfall_probability'][ablation_mask]
+            ])
+            
+            # Apply imputation
+            ablation_features_clean = self.scalers['linear_imputer'].transform(ablation_features)
+            
+            # Predict
+            albedo_ablation = self.models['linear'].predict(ablation_features_clean)
+            albedo_predicted[ablation_mask] = albedo_ablation
+            
+            print(f"Applied linear regression to {np.sum(ablation_mask)} ablation zone pixels (≤{ela}m)")
+        
+        # Apply MLP to accumulation zone (above ELA)
+        accumulation_mask = (elevation > ela) & ~np.isnan(elevation)
+        if np.any(accumulation_mask) and 'mlp' in self.models:
+            accumulation_features = np.column_stack([
+                features['TC'][accumulation_mask],
+                features['pdd'][accumulation_mask],
+                features['day_of_year'][accumulation_mask],
+                features['snowfall_probability'][accumulation_mask]
+            ])
+            
+            # Apply imputation and scaling
+            accumulation_features_clean = self.scalers['mlp_imputer'].transform(accumulation_features)
+            accumulation_features_scaled = self.scalers['mlp_scaler'].transform(accumulation_features_clean)
+            
+            # Predict
+            albedo_accumulation = self.models['mlp'].predict(accumulation_features_scaled)
+            albedo_predicted[accumulation_mask] = albedo_accumulation
+            
+            print(f"Applied MLP to {np.sum(accumulation_mask)} accumulation zone pixels (>{ela}m)")
+        
+        # Clip values to valid albedo range
+        albedo_predicted = np.clip(albedo_predicted, 0, 1)
+        
+        return albedo_predicted
+    
+    def visualize_spatial_albedo(self, glacier_name, albedo_array, target_date, save_path=None, figsize=(12, 10)):
+        """Create visualization of spatial albedo distribution with ELA line"""
+        dem_data = self.dems[glacier_name]
+        elevation = dem_data['elevation']
+        ela = self.get_ela_for_glacier(glacier_name)
+        
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+        
+        # Plot elevation with ELA contour
+        im1 = axes[0].imshow(elevation, cmap='terrain', alpha=0.8)
+        
+        # Add ELA contour line
+        contour = axes[0].contour(elevation, levels=[ela], colors='red', linewidths=2)
+        axes[0].clabel(contour, inline=True, fontsize=10, fmt=f'ELA={ela}m')
+        
+        axes[0].set_title(f'{glacier_name} - Elevation (m)')
+        axes[0].set_xlabel('Grid X')
+        axes[0].set_ylabel('Grid Y')
+        plt.colorbar(im1, ax=axes[0], shrink=0.8)
+        
+        # Plot albedo with ELA contour
+        albedo_cmap = LinearSegmentedColormap.from_list(
+            'albedo', ['darkblue', 'blue', 'lightblue', 'white'], N=256
+        )
+        
+        im2 = axes[1].imshow(albedo_array, cmap=albedo_cmap, vmin=0, vmax=1)
+        
+        # Add ELA contour line to albedo plot as well
+        contour2 = axes[1].contour(elevation, levels=[ela], colors='red', linewidths=2)
+        axes[1].clabel(contour2, inline=True, fontsize=10, fmt=f'ELA={ela}m')
+        
+        axes[1].set_title(f'{glacier_name} - Predicted Albedo\n{target_date.strftime("%Y-%m-%d")}')
+        axes[1].set_xlabel('Grid X')
+        axes[1].set_ylabel('Grid Y')
+        plt.colorbar(im2, ax=axes[1], shrink=0.8, label='Albedo')
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Saved visualization to {save_path}")
+        
+        plt.show()
+        
+        # Print statistics by zone
+        valid_albedo = albedo_array[~np.isnan(albedo_array)]
+        ablation_albedo = albedo_array[(elevation <= ela) & ~np.isnan(albedo_array)]
+        accumulation_albedo = albedo_array[(elevation > ela) & ~np.isnan(albedo_array)]
+        
+        if len(valid_albedo) > 0:
+            print(f"\nAlbedo Statistics for {glacier_name} (ELA = {ela}m):")
+            print(f"Overall - Mean: {np.mean(valid_albedo):.3f}, Std: {np.std(valid_albedo):.3f}, Range: {np.min(valid_albedo):.3f}-{np.max(valid_albedo):.3f}")
+            
+            if len(ablation_albedo) > 0:
+                print(f"Ablation zone (≤{ela}m) - Mean: {np.mean(ablation_albedo):.3f}, Std: {np.std(ablation_albedo):.3f}, n={len(ablation_albedo)}")
+            
+            if len(accumulation_albedo) > 0:
+                print(f"Accumulation zone (>{ela}m) - Mean: {np.mean(accumulation_albedo):.3f}, Std: {np.std(accumulation_albedo):.3f}, n={len(accumulation_albedo)}")
+    
+    def create_validation_predictions(self, glacier_names=None):
+        """Create albedo predictions for validation dates using glacier-specific ELAs"""
+        if glacier_names is None:
+            glacier_names = list(self.dems.keys())
+        
+        validation_dates = [
+            datetime(2011, 7, 26),
+            datetime(2011, 8, 20)
+        ]
+        
+        results = {}
+        
+        for date in validation_dates:
+            date_str = date.strftime('%Y-%m-%d')
+            results[date_str] = {}
+            
+            print(f"\n=== Processing {date_str} ===")
+            
+            for glacier_name in glacier_names:
+                ela = self.get_ela_for_glacier(glacier_name)
+                print(f"\nPredicting albedo for {glacier_name} (ELA = {ela}m)...")
+                
+                albedo_prediction = self.predict_spatial_albedo(glacier_name, date)
+                
+                if albedo_prediction is not None:
+                    results[date_str][glacier_name] = albedo_prediction
+                    
+                    # Create visualization
+                    save_path = f"{glacier_name}_albedo_{date.strftime('%Y%m%d')}_ELA{ela}m.png"
+                    self.visualize_spatial_albedo(
+                        glacier_name, 
+                        albedo_prediction, 
+                        date,
+                        save_path=save_path
+                    )
+                else:
+                    print(f"Failed to predict albedo for {glacier_name} on {date_str}")
+        
+        return results
+
+# Main workflow function with configurable ELAs
+def main():
+    """Main workflow for spatial albedo modeling with glacier-specific ELAs"""
+    
+    # Define file paths
+    dem_paths = {
+        'Hansbreen': r"D:\PhD\1st_year\1st_article\DEM\Hansbreen_DEM.tif",
+        'Werenskioldbreen': r"D:\PhD\1st_year\1st_article\DEM\Werenskioldbreen_DEM.tif"
+    }
+    
+    aws_data_paths = {
+        'hans4': r"D:\PhD\2nd_year\1st_article\Model_DEM\Stations_processed_data\hans4_2011_cleaned.csv",
+        'hans9': r"D:\PhD\2nd_year\1st_article\Model_DEM\Stations_processed_data\hans9_2011_cleaned.csv",
+        'werenskiold': r"D:\PhD\2nd_year\1st_article\Model_DEM\Stations_processed_data\werenskiold_2011_cleaned.csv"
+    }
+    
+    station_elevations = {
+        'hans4': 190,
+        'hans9': 420, 
+        'werenskiold': 380
+    }
+    
+    # Define glacier-specific ELAs
+    glacier_elas = {
+        'Hansbreen': 900,
+        'Werenskioldbreen': 900
+    }
+    
+    # Initialize model with ELA settings
+    spatial_model = SpatialAlbedoModel(
+        dem_paths, 
+        aws_data_paths, 
+        station_elevations, 
+        glacier_elas=glacier_elas
+    )
+    
+    # Load data
+    print("Loading DEM and AWS data...")
+    spatial_model.load_dems()
+    spatial_model.load_aws_data()
+    
+    # Calculate topographic variables
+    print("\nCalculating topographic variables...")
+    for glacier_name in dem_paths.keys():
+        spatial_model.calculate_topographic_variables(glacier_name)
+    
+    # Train models
+    print("\nTraining models...")
+    spatial_model.train_models_from_data()
+    
+    # Create predictions for validation dates
+    print("\nCreating validation predictions...")
+    validation_results = spatial_model.create_validation_predictions()
+    
+    return spatial_model, validation_results
+
+if __name__ == "__main__":
+    # Run the main workflow
+    model, results = main()
+
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+from rasterio.warp import reproject, Resampling, calculate_default_transform
+from rasterio.crs import CRS
+import os
+import pandas as pd
+from datetime import datetime
+from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+import warnings
+warnings.filterwarnings('ignore')
+
+class UnifiedGlacierAlbedoAnalysis:
+    """
+    Unified framework for comparing satellite-derived and modeled albedo values
+    with realistic albedo filtering and consistent CRS handling
+    """
+    
+    def __init__(self, spatial_model=None, target_crs="EPSG:32633", min_albedo=0.2, max_albedo=0.9):
+        """
+        Initialize with your existing SpatialAlbedoModel and realistic albedo filtering
+        
+        Parameters:
+        spatial_model: Your trained SpatialAlbedoModel instance
+        target_crs (str): Target coordinate reference system (default: UTM 33N for Svalbard)
+        min_albedo (float): Minimum realistic albedo value (default: 0.2 for ice)
+        max_albedo (float): Maximum realistic albedo value (default: 0.9 for fresh snow)
+        """
+        self.target_crs = CRS.from_string(target_crs)
+        self.spatial_model = spatial_model
+        self.min_albedo = min_albedo
+        self.max_albedo = max_albedo
+        self.satellite_data = {}
+        self.unified_grids = {}
+        
+        # Use the same ELA settings as your model
+        if spatial_model:
+            self.glacier_elas = spatial_model.glacier_elas
+        else:
+            self.glacier_elas = {
+                'Hansbreen': 400,
+                'Werenskioldbreen': 500
+            }
+        
+        print(f"Initialized unified analysis framework with target CRS: {target_crs}")
+        print(f"Realistic albedo filtering: [{min_albedo} - {max_albedo}]")
+        print(f"- Minimum ({min_albedo}): Albedo of ice")
+        print(f"- Maximum ({max_albedo}): Albedo of fresh snow")
+        
+        if spatial_model:
+            print("✅ Using your trained SpatialAlbedoModel for predictions")
+        else:
+            print("⚠️  No SpatialAlbedoModel provided - will create simplified model")
+    
+    def load_satellite_albedo_with_filtering(self, satellite_files_data):
+        """
+        Load satellite albedo data with realistic albedo filtering and reproject to target CRS if needed
+        """
+        print("\n=== Loading Satellite Albedo Data with Realistic Filtering ===")
+        
+        for file_info in satellite_files_data:
+            filepath = file_info['filepath']
+            glacier_name = file_info['glacier']
+            date = file_info['date']
+            
+            if not os.path.exists(filepath):
+                print(f"⚠️  Satellite file not found: {filepath}")
+                continue
+            
+            try:
+                with rasterio.open(filepath) as src:
+                    original_data = src.read(1)
+                    original_crs = src.crs
+                    original_transform = src.transform
+                    nodata_value = src.nodata
+                    
+                    print(f"Loading {glacier_name} - {date}")
+                    print(f"  Original CRS: {original_crs}")
+                    print(f"  Target CRS: {self.target_crs}")
+                    
+                    # Check if reprojection is needed
+                    if original_crs != self.target_crs:
+                        print(f"  Reprojecting from {original_crs} to {self.target_crs}")
+                        
+                        dst_transform, dst_width, dst_height = calculate_default_transform(
+                            original_crs, self.target_crs,
+                            src.width, src.height,
+                            *src.bounds
+                        )
+                        
+                        reprojected_data = np.empty((dst_height, dst_width), dtype=np.float32)
+                        
+                        reproject(
+                            source=original_data,
+                            destination=reprojected_data,
+                            src_transform=original_transform,
+                            src_crs=original_crs,
+                            dst_transform=dst_transform,
+                            dst_crs=self.target_crs,
+                            resampling=Resampling.bilinear,
+                            src_nodata=nodata_value,
+                            dst_nodata=nodata_value
+                        )
+                        
+                        albedo_data = reprojected_data
+                        transform = dst_transform
+                        
+                    else:
+                        albedo_data = original_data.astype(np.float32)
+                        transform = original_transform
+                        print("  No reprojection needed")
+                    
+                    # Handle NoData values (original valid mask)
+                    if nodata_value is not None:
+                        original_valid_mask = albedo_data != nodata_value
+                    else:
+                        original_valid_mask = (~np.isnan(albedo_data)) & (albedo_data >= 0) & (albedo_data <= 1)
+                    
+                    # Apply realistic albedo filtering
+                    realistic_mask = (albedo_data >= self.min_albedo) & (albedo_data <= self.max_albedo)
+                    
+                    # Combine both masks - data must be valid AND realistic
+                    final_valid_mask = original_valid_mask & realistic_mask
+                    
+                    # Calculate statistics for filtered data
+                    original_valid_albedo = albedo_data[original_valid_mask]
+                    filtered_albedo = albedo_data[final_valid_mask]
+                    
+                    # Print filtering statistics
+                    total_pixels = albedo_data.size
+                    original_valid_pixels = np.sum(original_valid_mask)
+                    unrealistic_pixels = np.sum(original_valid_mask & ~realistic_mask)
+                    final_valid_pixels = np.sum(final_valid_mask)
+                    
+                    print(f"  Filtering results:")
+                    print(f"    Total pixels: {total_pixels:,}")
+                    print(f"    Original valid pixels: {original_valid_pixels:,}")
+                    print(f"    Unrealistic pixels removed: {unrealistic_pixels:,}")
+                    print(f"    Final valid pixels: {final_valid_pixels:,}")
+                    
+                    if unrealistic_pixels > 0 and original_valid_pixels > 0:
+                        print(f"    Percentage filtered out: {(unrealistic_pixels/original_valid_pixels)*100:.1f}%")
+                    
+                    # Calculate statistics
+                    if len(filtered_albedo) > 0:
+                        mean_albedo = np.mean(filtered_albedo)
+                        std_albedo = np.std(filtered_albedo)
+                        median_albedo = np.median(filtered_albedo)
+                    else:
+                        mean_albedo = std_albedo = median_albedo = np.nan
+                    
+                    # Store satellite data
+                    key = f"{glacier_name}_{date}"
+                    self.satellite_data[key] = {
+                        'glacier': glacier_name,
+                        'date': date,
+                        'albedo': albedo_data,
+                        'valid_mask': final_valid_mask,  # Use filtered mask
+                        'original_valid_mask': original_valid_mask,
+                        'realistic_mask': realistic_mask,
+                        'mean_albedo': mean_albedo,
+                        'std_albedo': std_albedo,
+                        'median_albedo': median_albedo,
+                        'transform': transform,
+                        'crs': self.target_crs,
+                        'shape': albedo_data.shape,
+                        'bounds': rasterio.transform.array_bounds(
+                            albedo_data.shape[0], albedo_data.shape[1], transform
+                        ),
+                        'filtering_stats': {
+                            'total_pixels': total_pixels,
+                            'original_valid': original_valid_pixels,
+                            'unrealistic_removed': unrealistic_pixels,
+                            'final_valid': final_valid_pixels
+                        }
+                    }
+                    
+                    print(f"  ✅ Loaded and filtered: {albedo_data.shape}")
+                    print(f"  Mean albedo (filtered): {mean_albedo:.4f}")
+                    print(f"  Std albedo (filtered): {std_albedo:.4f}")
+                    print(f"  Valid pixels: {final_valid_pixels:,} / {total_pixels:,}")
+                    
+            except Exception as e:
+                print(f"❌ Error loading satellite data {filepath}: {e}")
+    
+    def create_unified_grid(self, glacier_name, target_resolution=30):
+        """
+        Create a unified spatial grid for comparing satellite and model data
+        """
+        print(f"\n=== Creating Unified Grid for {glacier_name} ===")
+        
+        # Get all data sources for this glacier
+        satellite_keys = [k for k in self.satellite_data.keys() if glacier_name in k]
+        
+        if not self.spatial_model or glacier_name not in self.spatial_model.dems:
+            print(f"❌ No DEM data available for {glacier_name} in your model")
+            return
+        
+        if not satellite_keys:
+            print(f"❌ No satellite data available for {glacier_name}")
+            return
+        
+        # Collect all bounds to determine unified extent
+        all_bounds = []
+        
+        # Add satellite data bounds
+        for sat_key in satellite_keys:
+            all_bounds.append(self.satellite_data[sat_key]['bounds'])
+        
+        # Calculate unified bounds (intersection of all datasets)
+        min_x = max([bounds[0] for bounds in all_bounds])  # left
+        min_y = max([bounds[1] for bounds in all_bounds])  # bottom
+        max_x = min([bounds[2] for bounds in all_bounds])  # right
+        max_y = min([bounds[3] for bounds in all_bounds])  # top
+        
+        if min_x >= max_x or min_y >= max_y:
+            print(f"❌ No spatial overlap found for {glacier_name}")
+            return
+        
+        print(f"Unified bounds: ({min_x:.1f}, {min_y:.1f}, {max_x:.1f}, {max_y:.1f})")
+        
+        # Create unified grid
+        width = int((max_x - min_x) / target_resolution)
+        height = int((max_y - min_y) / target_resolution)
+        
+        unified_transform = rasterio.transform.from_bounds(
+            min_x, min_y, max_x, max_y, width, height
+        )
+        
+        self.unified_grids[glacier_name] = {
+            'bounds': (min_x, min_y, max_x, max_y),
+            'shape': (height, width),
+            'transform': unified_transform,
+            'resolution': target_resolution,
+            'crs': self.target_crs
+        }
+        
+        print(f"✅ Created unified grid: {height}x{width} pixels at {target_resolution}m resolution")
+    
+    def resample_to_unified_grid(self, glacier_name):
+        """
+        Resample all data sources to the unified grid for comparison
+        """
+        if glacier_name not in self.unified_grids:
+            print(f"❌ No unified grid available for {glacier_name}")
+            return
+        
+        print(f"\n=== Resampling Data to Unified Grid: {glacier_name} ===")
+        
+        unified_grid = self.unified_grids[glacier_name]
+        target_shape = unified_grid['shape']
+        target_transform = unified_grid['transform']
+        
+        resampled_data = {}
+        
+        # Resample DEM data from your model
+        if self.spatial_model and glacier_name in self.spatial_model.dems:
+            dem_data = self.spatial_model.dems[glacier_name]
+            dem_crs = dem_data.get('crs', CRS.from_string('EPSG:3413'))
+            
+            if isinstance(dem_crs, str):
+                dem_crs = CRS.from_string(dem_crs)
+            
+            for var_name in ['elevation', 'slope', 'aspect']:
+                if var_name in dem_data:
+                    resampled_var = np.empty(target_shape, dtype=np.float32)
+                    
+                    reproject(
+                        source=dem_data[var_name],
+                        destination=resampled_var,
+                        src_transform=dem_data['transform'],
+                        src_crs=dem_crs,
+                        dst_transform=target_transform,
+                        dst_crs=self.target_crs,
+                        resampling=Resampling.bilinear,
+                        src_nodata=np.nan,
+                        dst_nodata=np.nan
+                    )
+                    
+                    resampled_data[f'dem_{var_name}'] = resampled_var
+            
+            print(f"✅ Resampled DEM data from your model")
+        
+        # Resample satellite albedo data (with filtering)
+        satellite_keys = [k for k in self.satellite_data.keys() if glacier_name in k]
+        
+        for sat_key in satellite_keys:
+            sat_data = self.satellite_data[sat_key]
+            
+            # Resample albedo data
+            resampled_albedo = np.empty(target_shape, dtype=np.float32)
+            reproject(
+                source=sat_data['albedo'],
+                destination=resampled_albedo,
+                src_transform=sat_data['transform'],
+                src_crs=self.target_crs,
+                dst_transform=target_transform,
+                dst_crs=self.target_crs,
+                resampling=Resampling.bilinear,
+                src_nodata=np.nan,
+                dst_nodata=np.nan
+            )
+            
+            # Resample valid mask (filtered)
+            resampled_mask = np.empty(target_shape, dtype=np.float32)
+            reproject(
+                source=sat_data['valid_mask'].astype(np.float32),
+                destination=resampled_mask,
+                src_transform=sat_data['transform'],
+                src_crs=self.target_crs,
+                dst_transform=target_transform,
+                dst_crs=self.target_crs,
+                resampling=Resampling.nearest,  # Use nearest for mask
+                src_nodata=0,
+                dst_nodata=0
+            )
+            
+            # Apply realistic albedo filtering to resampled data
+            realistic_resampled_mask = (
+                (resampled_mask > 0.5) & 
+                (~np.isnan(resampled_albedo)) & 
+                (resampled_albedo >= self.min_albedo) & 
+                (resampled_albedo <= self.max_albedo)
+            )
+            
+            resampled_data[f'satellite_albedo_{sat_data["date"]}'] = resampled_albedo
+            resampled_data[f'satellite_mask_{sat_data["date"]}'] = realistic_resampled_mask
+            
+            print(f"✅ Resampled satellite albedo (filtered): {sat_data['date']}")
+            print(f"   Valid pixels in resampled grid: {np.sum(realistic_resampled_mask):,}")
+        
+        # Store resampled data
+        self.unified_grids[glacier_name]['resampled_data'] = resampled_data
+        
+        print(f"✅ All data resampled to unified {target_shape[0]}x{target_shape[1]} grid")
+    
+    def predict_modeled_albedo_unified_grid(self, glacier_name, target_date, day_of_year=None):
+        """
+        Use YOUR trained model to predict albedo on the unified grid
+        """
+        if not self.spatial_model:
+            print(f"❌ No SpatialAlbedoModel available")
+            return None
+            
+        if glacier_name not in self.unified_grids:
+            print(f"❌ No unified grid available for {glacier_name}")
+            return None
+        
+        print(f"\n=== Using Your Model to Predict Albedo: {glacier_name} - {target_date} ===")
+        
+        # First, get prediction from your original model
+        original_prediction = self.spatial_model.predict_spatial_albedo(glacier_name, target_date, day_of_year)
+        
+        if original_prediction is None:
+            print(f"❌ Your model could not generate prediction")
+            return None
+        
+        # Now reproject this prediction to the unified grid
+        unified_grid = self.unified_grids[glacier_name]
+        target_shape = unified_grid['shape']
+        target_transform = unified_grid['transform']
+        
+        # Get original DEM transform and CRS
+        dem_data = self.spatial_model.dems[glacier_name]
+        original_transform = dem_data['transform']
+        original_crs = dem_data.get('crs', CRS.from_string('EPSG:3413'))
+        
+        if isinstance(original_crs, str):
+            original_crs = CRS.from_string(original_crs)
+        
+        # Reproject the prediction to unified grid
+        unified_prediction = np.empty(target_shape, dtype=np.float32)
+        
+        reproject(
+            source=original_prediction,
+            destination=unified_prediction,
+            src_transform=original_transform,
+            src_crs=original_crs,
+            dst_transform=target_transform,
+            dst_crs=self.target_crs,
+            resampling=Resampling.bilinear,
+            src_nodata=np.nan,
+            dst_nodata=np.nan
+        )
+        
+        # Calculate statistics
+        valid_mask = ~np.isnan(unified_prediction)
+        if np.any(valid_mask):
+            mean_albedo = np.mean(unified_prediction[valid_mask])
+            print(f"✅ Reprojected your model prediction to unified grid")
+            print(f"   Valid pixels: {np.sum(valid_mask):,}")
+            print(f"   Mean predicted albedo: {mean_albedo:.3f}")
+        else:
+            print(f"❌ No valid predictions in unified grid")
+            return None
+        
+        return unified_prediction
+    
+    def compare_approaches(self, glacier_name, date_str):
+        """
+        Compare satellite and YOUR modeled albedo for a specific glacier and date
+        """
+        print(f"\n=== Comparing Approaches: {glacier_name} - {date_str} ===")
+        
+        if glacier_name not in self.unified_grids:
+            print(f"❌ No unified grid available for {glacier_name}")
+            return
+        
+        unified_grid = self.unified_grids[glacier_name]
+        resampled_data = unified_grid['resampled_data']
+        
+        # Get satellite data (already filtered)
+        sat_key = f'satellite_albedo_{date_str}'
+        sat_mask_key = f'satellite_mask_{date_str}'
+        
+        if sat_key not in resampled_data:
+            print(f"❌ No satellite data available for {date_str}")
+            return
+        
+        satellite_albedo = resampled_data[sat_key]
+        satellite_mask = resampled_data[sat_mask_key]
+        
+        # Get modeled data using YOUR model
+        target_date = datetime.strptime(date_str, '%d.%m.%Y')
+        modeled_albedo = self.predict_modeled_albedo_unified_grid(glacier_name, target_date)
+        
+        if modeled_albedo is None:
+            print(f"❌ Could not generate modeled albedo using your model")
+            return
+        
+        # Create comparison visualization
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # Elevation
+        elevation = resampled_data['dem_elevation']
+        im1 = axes[0, 0].imshow(elevation, cmap='terrain')
+        axes[0, 0].set_title(f'{glacier_name} - Elevation (m)')
+        plt.colorbar(im1, ax=axes[0, 0])
+        
+        # Add ELA contour to elevation
+        ela = self.glacier_elas.get(glacier_name, 400)
+        contour = axes[0, 0].contour(elevation, levels=[ela], colors='red', linewidths=2)
+        axes[0, 0].clabel(contour, inline=True, fontsize=10, fmt=f'ELA={ela}m')
+        
+        # Satellite albedo (filtered)
+        albedo_cmap = LinearSegmentedColormap.from_list(
+            'albedo', ['darkblue', 'blue', 'lightblue', 'white'], N=256
+        )
+        
+        masked_sat = np.ma.masked_where(~satellite_mask, satellite_albedo)
+        im2 = axes[0, 1].imshow(masked_sat, cmap=albedo_cmap, vmin=0, vmax=1)
+        axes[0, 1].set_title(f'Satellite Albedo (Filtered) - {date_str}')
+        plt.colorbar(im2, ax=axes[0, 1])
+        
+        # Modeled albedo
+        masked_model = np.ma.masked_where(np.isnan(modeled_albedo), modeled_albedo)
+        im3 = axes[0, 2].imshow(masked_model, cmap=albedo_cmap, vmin=0, vmax=1)
+        axes[0, 2].set_title(f'Your Model Albedo - {date_str}')
+        plt.colorbar(im3, ax=axes[0, 2])
+        
+        # Difference map
+        comparison_mask = satellite_mask & ~np.isnan(modeled_albedo)
+        difference = np.full_like(satellite_albedo, np.nan)
+        difference[comparison_mask] = modeled_albedo[comparison_mask] - satellite_albedo[comparison_mask]
+        
+        im4 = axes[1, 0].imshow(difference, cmap='RdBu_r', vmin=-0.5, vmax=0.5)
+        axes[1, 0].set_title('Difference (Your Model - Satellite)')
+        plt.colorbar(im4, ax=axes[1, 0])
+        
+        # Scatter plot
+        if np.any(comparison_mask):
+            sat_values = satellite_albedo[comparison_mask]
+            mod_values = modeled_albedo[comparison_mask]
+            
+            axes[1, 1].scatter(sat_values, mod_values, alpha=0.5, s=1)
+            axes[1, 1].plot([0, 1], [0, 1], 'r--', linewidth=1)
+            axes[1, 1].set_xlabel('Satellite Albedo (Filtered)')
+            axes[1, 1].set_ylabel('Your Model Albedo')
+            axes[1, 1].set_title('Satellite vs Your Model')
+            axes[1, 1].set_xlim(0, 1)
+            axes[1, 1].set_ylim(0, 1)
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            # Calculate statistics
+            correlation = np.corrcoef(sat_values, mod_values)[0, 1]
+            rmse = np.sqrt(np.mean((mod_values - sat_values)**2))
+            bias = np.mean(mod_values - sat_values)
+            mae = np.mean(np.abs(mod_values - sat_values))
+            
+            stats_text = f'n = {len(sat_values):,}\nr = {correlation:.3f}\nRMSE = {rmse:.3f}\nBias = {bias:+.3f}\nMAE = {mae:.3f}'
+            axes[1, 1].text(0.05, 0.95, stats_text, transform=axes[1, 1].transAxes, 
+                          verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Histogram of differences
+        if np.any(comparison_mask):
+            diff_values = difference[comparison_mask]
+            axes[1, 2].hist(diff_values, bins=50, alpha=0.7, edgecolor='black')
+            axes[1, 2].axvline(x=0, color='red', linestyle='--', linewidth=1)
+            axes[1, 2].set_xlabel('Difference (Your Model - Satellite)')
+            axes[1, 2].set_ylabel('Frequency')
+            axes[1, 2].set_title('Difference Distribution')
+            axes[1, 2].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Print summary statistics
+        if np.any(comparison_mask):
+            sat_values = satellite_albedo[comparison_mask]
+            mod_values = modeled_albedo[comparison_mask]
+            
+            print(f"\nComparison Statistics ({len(sat_values):,} pixels):")
+            print(f"Satellite albedo (filtered) - Mean: {np.mean(sat_values):.3f}, Std: {np.std(sat_values):.3f}")
+            print(f"Your model albedo - Mean: {np.mean(mod_values):.3f}, Std: {np.std(mod_values):.3f}")
+            print(f"Correlation: {correlation:.3f}")
+            print(f"RMSE: {rmse:.3f}")
+            print(f"Bias (Your Model - Satellite): {bias:+.3f}")
+            print(f"Mean absolute error: {mae:.3f}")
+
+def main_fixed_analysis(spatial_model, min_albedo=0.2, max_albedo=0.9):
+    """
+    Main function that uses YOUR trained SpatialAlbedoModel for comparison with realistic filtering
+    """
+    # Initialize unified framework with your model and filtering parameters
+    analyzer = UnifiedGlacierAlbedoAnalysis(
+        spatial_model=spatial_model, 
+        target_crs="EPSG:32633",
+        min_albedo=min_albedo,
+        max_albedo=max_albedo
+    )
+    
+    # Define satellite file paths (update these to your actual paths)
+    satellite_files_data = [
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72110052011207ASN00_2011-07-26\Calculated\Werenskiold_02_albedo_26_07_2011.tif",
+            'glacier': 'Werenskioldbreen',
+            'date': '26.07.2011'
+        },
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72100052011232ASN00_2011-08-20\Calculated\Werenskiold_02_albedo_20_08_2011.tif",
+            'glacier': 'Werenskioldbreen',
+            'date': '20.08.2011'
+        },
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72110052011207ASN00_2011-07-26\Calculated\Hans_02_albedo_26_07_2011.tif",
+            'glacier': 'Hansbreen',
+            'date': '26.07.2011'
+        },
+        {
+            'filepath': r"D:\PhD\1st_year\1st_article\Landsat_images\15-08-2011\LE72100052011232ASN00_2011-08-20\Calculated\Hans_02_albedo_20_08_2011.tif",
+            'glacier': 'Hansbreen',
+            'date': '20.08.2011'
+        }
+    ]
+    
+    # Load satellite data with filtering
+    print("Step 1: Loading satellite albedo data with realistic filtering...")
+    analyzer.load_satellite_albedo_with_filtering(satellite_files_data)
+    
+    # Create unified grids for each glacier
+    print("\nStep 2: Creating unified spatial grids...")
+    for glacier_name in ['Hansbreen', 'Werenskioldbreen']:
+        analyzer.create_unified_grid(glacier_name, target_resolution=30)
+        analyzer.resample_to_unified_grid(glacier_name)
+    
+    # Perform comparisons for each date
+    print("\nStep 3: Comparing satellite vs YOUR modeled albedo...")
+    comparison_dates = ['26.07.2011', '20.08.2011']
+    
+    for glacier_name in ['Hansbreen', 'Werenskioldbreen']:
+        for date_str in comparison_dates:
+            analyzer.compare_approaches(glacier_name, date_str)
+    
+    return analyzer
+
+def create_summary_statistics_fixed(analyzer):
+    """
+    Create comprehensive summary statistics using your model with filtered data
+    """
+    print("\n" + "="*80)
+    print("SUMMARY STATISTICS - YOUR MODEL vs SATELLITE (FILTERED DATA)")
+    print("="*80)
+    print(f"Filtering applied: Albedo range [{analyzer.min_albedo:.1f} - {analyzer.max_albedo:.1f}]")
+    print(f"- Minimum ({analyzer.min_albedo:.1f}): Albedo of ice")
+    print(f"- Maximum ({analyzer.max_albedo:.1f}): Albedo of fresh snow")
+    print("-"*80)
+    
+    summary_data = []
+    
+    for glacier_name in ['Hansbreen', 'Werenskioldbreen']:
+        if glacier_name not in analyzer.unified_grids:
+            continue
+            
+        unified_grid = analyzer.unified_grids[glacier_name]
+        resampled_data = unified_grid['resampled_data']
+        
+        for date_str in ['26.07.2011', '20.08.2011']:
+            sat_key = f'satellite_albedo_{date_str}'
+            sat_mask_key = f'satellite_mask_{date_str}'
+            
+            if sat_key in resampled_data and sat_mask_key in resampled_data:
+                satellite_albedo = resampled_data[sat_key]
+                satellite_mask = resampled_data[sat_mask_key]
+                
+                # Get modeled albedo using YOUR model
+                target_date = datetime.strptime(date_str, '%d.%m.%Y')
+                modeled_albedo = analyzer.predict_modeled_albedo_unified_grid(glacier_name, target_date)
+                
+                if modeled_albedo is not None:
+                    comparison_mask = satellite_mask & ~np.isnan(modeled_albedo)
+                    
+                    if np.any(comparison_mask):
+                        sat_values = satellite_albedo[comparison_mask]
+                        mod_values = modeled_albedo[comparison_mask]
+                        
+                        # Calculate statistics
+                        correlation = np.corrcoef(sat_values, mod_values)[0, 1]
+                        rmse = np.sqrt(np.mean((mod_values - sat_values)**2))
+                        bias = np.mean(mod_values - sat_values)
+                        mae = np.mean(np.abs(mod_values - sat_values))
+                        
+                        summary_data.append({
+                            'Glacier': glacier_name,
+                            'Date': date_str,
+                            'Pixels': len(sat_values),
+                            'Satellite_Mean': np.mean(sat_values),
+                            'Satellite_Std': np.std(sat_values),
+                            'YourModel_Mean': np.mean(mod_values),
+                            'YourModel_Std': np.std(mod_values),
+                            'Correlation': correlation,
+                            'RMSE': rmse,
+                            'Bias': bias,
+                            'MAE': mae
+                        })
+    
+    # Create summary table
+    if summary_data:
+        summary_df = pd.DataFrame(summary_data)
+        
+        print("\nDetailed Comparison Statistics (Your Model vs Satellite - Filtered Data):")
+        print("-" * 140)
+        print(f"{'Glacier':<15} {'Date':<12} {'Pixels':<8} {'Sat_Mean':<9} {'Sat_Std':<8} {'Mod_Mean':<9} {'Mod_Std':<8} {'Corr':<6} {'RMSE':<6} {'Bias':<7} {'MAE':<6}")
+        print("-" * 140)
+        
+        for _, row in summary_df.iterrows():
+            print(f"{row['Glacier']:<15} {row['Date']:<12} {row['Pixels']:<8,} "
+                  f"{row['Satellite_Mean']:<9.3f} {row['Satellite_Std']:<8.3f} "
+                  f"{row['YourModel_Mean']:<9.3f} {row['YourModel_Std']:<8.3f} "
+                  f"{row['Correlation']:<6.3f} {row['RMSE']:<6.3f} "
+                  f"{row['Bias']:<+7.3f} {row['MAE']:<6.3f}")
+        
+        # Overall statistics
+        print("\nOverall Statistics (Your Model vs Filtered Satellite Data):")
+        print("-" * 60)
+        print(f"Mean correlation: {summary_df['Correlation'].mean():.3f} ± {summary_df['Correlation'].std():.3f}")
+        print(f"Mean RMSE: {summary_df['RMSE'].mean():.3f} ± {summary_df['RMSE'].std():.3f}")
+        print(f"Mean bias: {summary_df['Bias'].mean():.3f} ± {summary_df['Bias'].std():.3f}")
+        print(f"Mean MAE: {summary_df['MAE'].mean():.3f} ± {summary_df['MAE'].std():.3f}")
+        
+        # Temporal analysis
+        print("\nTemporal Analysis:")
+        print("-" * 40)
+        for glacier in ['Hansbreen', 'Werenskioldbreen']:
+            glacier_data = summary_df[summary_df['Glacier'] == glacier]
+            if len(glacier_data) >= 2:
+                july_data = glacier_data[glacier_data['Date'] == '26.07.2011']
+                august_data = glacier_data[glacier_data['Date'] == '20.08.2011']
+                
+                if len(july_data) > 0 and len(august_data) > 0:
+                    july_sat = july_data['Satellite_Mean'].iloc[0]
+                    august_sat = august_data['Satellite_Mean'].iloc[0]
+                    july_mod = july_data['YourModel_Mean'].iloc[0]
+                    august_mod = august_data['YourModel_Mean'].iloc[0]
+                    
+                    sat_change = august_sat - july_sat
+                    mod_change = august_mod - july_mod
+                    
+                    print(f"{glacier}:")
+                    print(f"  Satellite change (July → August): {sat_change:+.3f}")
+                    print(f"  Your model change (July → August): {mod_change:+.3f}")
+                    print(f"  Change difference: {mod_change - sat_change:+.3f}")
+        
+        # Filtering impact summary
+        print("\nFiltering Impact Summary:")
+        print("-" * 40)
+        for glacier_name in ['Hansbreen', 'Werenskioldbreen']:
+            glacier_data = [k for k in analyzer.satellite_data.keys() if glacier_name in k]
+            if glacier_data:
+                print(f"{glacier_name}:")
+                for key in glacier_data:
+                    sat_data = analyzer.satellite_data[key]
+                    stats = sat_data['filtering_stats']
+                    date = sat_data['date']
+                    
+                    removal_pct = (stats['unrealistic_removed'] / stats['original_valid']) * 100 if stats['original_valid'] > 0 else 0
+                    print(f"  {date}: {stats['unrealistic_removed']:,} pixels removed ({removal_pct:.1f}%)")
+                    print(f"    Original valid: {stats['original_valid']:,} → Final valid: {stats['final_valid']:,}")
+        
+        return summary_df
+    
+    return None
+
+# Check if your model exists and what it's called
+if 'model' in locals():
+    print("✅ Found 'model' variable")
+    your_trained_model = model
+elif 'spatial_model' in locals():
+    print("✅ Found 'spatial_model' variable") 
+    your_trained_model = spatial_model
+else:
+    print("❌ No model found. Please run your first script first.")
+    your_trained_model = None
+
+# Run the enhanced analysis using YOUR actual model with realistic filtering
+if your_trained_model is not None:
+    print("🚀 Starting enhanced analysis with your trained model and realistic filtering...")
+    print("Filtering parameters:")
+    print("  - Minimum albedo: 0.15 (ice)")
+    print("  - Maximum albedo: 0.85 (fresh snow)")
+    print("  - Removes: water, rock, debris, clouds, sensor errors")
+    print("  - Keeps: realistic glacier surface albedo values")
+    
+    analyzer = main_fixed_analysis(your_trained_model, min_albedo=0.15, max_albedo=0.85)
+    summary_df = create_summary_statistics_fixed(analyzer)
+    print("✅ Enhanced analysis complete!")
+else:
+    print("Cannot proceed without your trained model.")
